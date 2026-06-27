@@ -7,7 +7,7 @@
 # Configuration
 # ------------------------------------------------------------------
 BINARY        := notes-server
-CMD_DIR       := .
+CMD_DIR       := ./cmd/notes-server
 GO            := go
 GOFLAGS       := -ldflags="-s -w"
 DIST_DIR      := dist

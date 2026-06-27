@@ -1,0 +1,6 @@
+notes-server
+notes-server.exe
+dist/
+node_modules/
+presentations/
+.cache/

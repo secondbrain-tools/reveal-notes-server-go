@@ -75,14 +75,13 @@ Go cross-compilation is lightweight — no special toolchains required. A full `
 
 ```
 remote-notes-server/
-├── main.go                  # Entry point — parses flags, starts server
 ├── go.mod / go.sum          # Go module definition
 ├── Makefile                 # Build automation
+├── cmd/
+│   └── notes-server/
+│       └── main.go          # Entry point — parses flags, starts server
 ├── notes-server.js          # Node.js implementation (alternative server)
 ├── manifest.yaml            # Runtime manifest for the publisher
-├── notes-server             # Compiled binary (build artifact)
-├── node_modules/            # npm dependencies
-├── presentations/           # Runtime directory for uploaded presentations
 └── internal/
     └── notes/
         ├── server.go        # Server setup, Socket.IO config, HTTP routing

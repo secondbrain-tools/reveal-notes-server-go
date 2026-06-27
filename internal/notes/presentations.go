@@ -56,11 +56,11 @@ type PresentationInfo struct {
 
 // PresentationStore manages uploaded presentations on disk.
 type PresentationStore struct {
-	mu       sync.RWMutex
-	dir      string
-	ttl      time.Duration
-	now      func() time.Time
-	items    map[string]*Presentation
+	mu    sync.RWMutex
+	dir   string
+	ttl   time.Duration
+	now   func() time.Time
+	items map[string]*Presentation
 }
 
 // NewPresentationStore creates a new PresentationStore rooted at dir.
@@ -265,6 +265,11 @@ func HandleUploadPresentation(store *PresentationStore) http.HandlerFunc {
 		if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") &&
 			header.Header.Get("Content-Type") != "application/zip" {
 			http.Error(w, "Upload must be a zip file", http.StatusBadRequest)
+			return
+		}
+
+		if !validPresentationName.MatchString(name) {
+			http.Error(w, "Invalid presentation name", http.StatusBadRequest)
 			return
 		}
 

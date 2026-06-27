@@ -18,7 +18,7 @@ import (
 // testServer is a helper that creates a test server with a default config.
 type testServer struct {
 	server *Server
-	ts     *httptest.Server
+	mux    *http.ServeMux
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -40,27 +40,22 @@ func newTestServer(t *testing.T) *testServer {
 	}
 
 	s := NewServer(cfg)
-	ts := httptest.NewServer(s.Mux)
-
-	return &testServer{server: s, ts: ts}
+	return &testServer{server: s, mux: s.Mux}
 }
 
-func (ts *testServer) Close() {
-	ts.ts.Close()
+func (ts *testServer) Do(req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	ts.mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestHandleHealth(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
-	resp, err := http.Get(ts.ts.URL + "/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp := ts.Do(req)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -73,18 +68,33 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+func TestNewServerAppliesDefaults(t *testing.T) {
+	cfg := ServerConfig{
+		Hostname:        "127.0.0.1",
+		Port:            0,
+		RevealDir:       t.TempDir(),
+		PresentationDir: t.TempDir(),
+	}
+
+	s := NewServer(cfg)
+	if s == nil {
+		t.Fatal("NewServer returned nil")
+	}
+	if s.Config.PresentationsDir != "presentations" {
+		t.Fatalf("expected default presentations dir, got %q", s.Config.PresentationsDir)
+	}
+	if s.PresentationTtl != 24*time.Hour {
+		t.Fatalf("expected default presentation TTL of 24h, got %v", s.PresentationTtl)
+	}
+}
+
 func TestHandleRootServesIndex(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
-	resp, err := http.Get(ts.ts.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp := ts.Do(req)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -97,21 +107,15 @@ func TestHandleRootFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 	// No index file in this dir
 
-	_ = NewSessionStore() // ensure store is used
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", HandleRoot(tmpDir, "/index.html"))
 
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
 
-	resp, err := http.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -122,19 +126,14 @@ func TestHandleRootFallback(t *testing.T) {
 
 func TestHandleSessionsJSON(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
 	// Add a session
 	ts.server.Store.Touch("test-socket-id", nil)
 
-	resp, err := http.Get(ts.ts.URL + "/notes/sessions")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodGet, "/notes/sessions", nil)
+	resp := ts.Do(req)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -163,19 +162,14 @@ func TestHandleSessionsJSON(t *testing.T) {
 
 func TestHandleDashboard(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
 	// Add a session
 	ts.server.Store.Touch("test-socket-id", nil)
 
-	resp, err := http.Get(ts.ts.URL + "/notes")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodGet, "/notes/", nil)
+	resp := ts.Do(req)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -193,13 +187,9 @@ func TestHandleDashboard(t *testing.T) {
 
 func TestHandleDashboardEmpty(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
-	resp, err := http.Get(ts.ts.URL + "/notes")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req := httptest.NewRequest(http.MethodGet, "/notes/", nil)
+	resp := ts.Do(req)
 
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "No active sessions") {
@@ -209,17 +199,13 @@ func TestHandleDashboardEmpty(t *testing.T) {
 
 func TestHandleSpeakerView(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
 	socketId := "abc123xyz"
-	resp, err := http.Get(ts.ts.URL + "/notes/" + socketId)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req := httptest.NewRequest(http.MethodGet, "/notes/"+socketId, nil)
+	resp := ts.Do(req)
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -234,17 +220,13 @@ func TestHandleSpeakerView(t *testing.T) {
 
 func TestHandleSpeakerViewNoSocketId(t *testing.T) {
 	ts := newTestServer(t)
-	defer ts.Close()
 
-	resp, err := http.Get(ts.ts.URL + "/notes/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req := httptest.NewRequest(http.MethodGet, "/notes/", nil)
+	resp := ts.Do(req)
 
 	// /notes/ should redirect to dashboard
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for /notes/, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200 for /notes/, got %d", resp.Code)
 	}
 }
 
@@ -289,17 +271,12 @@ func TestStaticFileServing(t *testing.T) {
 	}
 
 	s := NewServer(cfg)
-	ts := httptest.NewServer(s.Mux)
-	defer ts.Close()
+	req := httptest.NewRequest(http.MethodGet, "/test.txt", nil)
+	resp := httptest.NewRecorder()
+	s.Mux.ServeHTTP(resp, req)
 
-	resp, err := http.Get(ts.URL + "/test.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -311,21 +288,17 @@ func TestStaticFileServing(t *testing.T) {
 func TestSocketIOConnectivity(t *testing.T) {
 	// Test that the Socket.IO handler is mounted and responds
 	ts := newTestServer(t)
-	defer ts.Close()
 
-	resp, err := http.Get(ts.ts.URL + "/socket.io/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req := httptest.NewRequest(http.MethodGet, "/socket.io/", nil)
+	resp := ts.Do(req)
 
 	// Engine.IO responds to GET with transport=polling query. Without
 	// proper handshake params, it returns 400. That's expected - it
 	// means the handler IS mounted.
-	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusOK {
-		t.Logf("Socket.IO handler responded with %d (mounted correctly)", resp.StatusCode)
+	if resp.Code == http.StatusBadRequest || resp.Code == http.StatusOK {
+		t.Logf("Socket.IO handler responded with %d (mounted correctly)", resp.Code)
 	} else {
-		t.Errorf("unexpected status code: %d", resp.StatusCode)
+		t.Errorf("unexpected status code: %d", resp.Code)
 	}
 }
 

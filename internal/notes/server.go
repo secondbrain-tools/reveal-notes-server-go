@@ -3,8 +3,8 @@ package notes
 import (
 	"fmt"
 	"log"
-	"net/http"
 	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,7 +13,6 @@ import (
 
 	etypes "github.com/zishang520/engine.io/types"
 	"github.com/zishang520/socket.io/socket"
-
 )
 
 // ServerConfig holds configuration for the notes server.
@@ -198,17 +197,19 @@ func NewServer(cfg ServerConfig) *Server {
 	srv.Mux = mux
 
 	// Start background pruning goroutine
-	pruneInterval := activeTtl
-	if pruneInterval > 60*time.Second {
-		pruneInterval = 60 * time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(pruneInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			store.Prune(activeTtl)
+	if activeTtl > 0 {
+		pruneInterval := activeTtl
+		if pruneInterval > 60*time.Second {
+			pruneInterval = 60 * time.Second
 		}
-	}()
+		go func() {
+			ticker := time.NewTicker(pruneInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				store.Prune(activeTtl)
+			}
+		}()
+	}
 
 	// Start background pruning for presentations
 	go func() {

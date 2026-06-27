@@ -15,6 +15,32 @@ import (
 	"time"
 )
 
+func TestRequireAccessToken(t *testing.T) {
+	handler := requireAccessToken("secret", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations", nil)
+	resp := httptest.NewRecorder()
+	handler(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.Code)
+	}
+	if body := strings.TrimSpace(resp.Body.String()); body != `{"error":"unauthorized"}` {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/presentations", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp = httptest.NewRecorder()
+	handler(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.Code)
+	}
+}
+
 // createZip creates an in-memory zip with the given files.
 func createZip(files map[string]string) ([]byte, error) {
 	var buf bytes.Buffer
@@ -48,13 +74,12 @@ func TestHandleUploadPresentation(t *testing.T) {
 	tmpDir := t.TempDir()
 	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
 
-	handler := HandleUploadPresentation(presStore)
-	ts := httptest.NewServer(http.HandlerFunc(handler))
-	defer ts.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/presentations/{name}", HandleUploadPresentation(presStore))
 
 	// Create a test zip
 	files := map[string]string{
-		"index.html":   "<html><body>Test</body></html>",
+		"index.html":    "<html><body>Test</body></html>",
 		"css/style.css": "body { margin: 0; }",
 	}
 	zipData, err := createZip(files)
@@ -64,21 +89,18 @@ func TestHandleUploadPresentation(t *testing.T) {
 
 	body, contentType := createMultipartBody("file", "test-pres.zip", zipData)
 
-	req, err := http.NewRequest("POST", ts.URL+"/api/presentations/my-talk", body)
+	req, err := http.NewRequest(http.MethodPost, "/api/presentations/my-talk", body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", contentType)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
 
-	if resp.StatusCode != http.StatusCreated {
+	if resp.Code != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		t.Fatalf("expected 201, got %d: %s", resp.StatusCode, string(bodyBytes))
+		t.Fatalf("expected 201, got %d: %s", resp.Code, string(bodyBytes))
 	}
 
 	// Verify the response JSON
@@ -109,27 +131,26 @@ func TestHandleUploadPresentationReplacesExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
 
-	handler := HandleUploadPresentation(presStore)
-	ts := httptest.NewServer(http.HandlerFunc(handler))
-	defer ts.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/presentations/{name}", HandleUploadPresentation(presStore))
 
 	// Upload first version
 	files1 := map[string]string{"index.html": "v1"}
 	zip1, _ := createZip(files1)
 	body1, ct1 := createMultipartBody("file", "pres.zip", zip1)
-	req1, _ := http.NewRequest("POST", ts.URL+"/api/presentations/test", body1)
+	req1, _ := http.NewRequest(http.MethodPost, "/api/presentations/test", body1)
 	req1.Header.Set("Content-Type", ct1)
-	resp1, _ := http.DefaultClient.Do(req1)
-	resp1.Body.Close()
+	resp1 := httptest.NewRecorder()
+	mux.ServeHTTP(resp1, req1)
 
 	// Upload second version (replaces)
 	files2 := map[string]string{"index.html": "v2"}
 	zip2, _ := createZip(files2)
 	body2, ct2 := createMultipartBody("file", "pres.zip", zip2)
-	req2, _ := http.NewRequest("POST", ts.URL+"/api/presentations/test", body2)
+	req2, _ := http.NewRequest(http.MethodPost, "/api/presentations/test", body2)
 	req2.Header.Set("Content-Type", ct2)
-	resp2, _ := http.DefaultClient.Do(req2)
-	resp2.Body.Close()
+	resp2 := httptest.NewRecorder()
+	mux.ServeHTTP(resp2, req2)
 
 	content, _ := os.ReadFile(filepath.Join(tmpDir, "test", "index.html"))
 	if string(content) != "v2" {
@@ -141,27 +162,21 @@ func TestHandleUploadPresentationInvalidName(t *testing.T) {
 	tmpDir := t.TempDir()
 	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
 
-	handler := HandleUploadPresentation(presStore)
-	ts := httptest.NewServer(http.HandlerFunc(handler))
-	defer ts.Close()
-
 	invalidNames := []string{"../evil", "name/with/slash", ""}
 	for _, name := range invalidNames {
 		files := map[string]string{"index.html": "test"}
 		zipData, _ := createZip(files)
 		body, contentType := createMultipartBody("file", "pres.zip", zipData)
 
-		// We construct URL manually since httptest mux doesn't route
-		req, _ := http.NewRequest("POST", ts.URL+"/api/presentations/"+name, body)
+		req, _ := http.NewRequest(http.MethodPost, "/api/presentations/test", body)
 		req.Header.Set("Content-Type", contentType)
+		req.SetPathValue("name", name)
+		resp := httptest.NewRecorder()
+		HandleUploadPresentation(presStore)(resp, req)
 
-		resp, _ := http.DefaultClient.Do(req)
-		resp.Body.Close()
-
-		// Invalid names should result in either 400 or 500 from the handler
-		// (since httptest server wraps it directly and path value may be URL-decoded)
-		if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusInternalServerError {
-			t.Logf("name=%q returned %d", name, resp.StatusCode)
+		// Invalid names should be rejected before touching disk.
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("name=%q returned %d", name, resp.Code)
 		}
 	}
 }
@@ -176,18 +191,12 @@ func TestHandleListPresentations(t *testing.T) {
 	presStore.now = func() time.Time { return time.Date(2026, 5, 11, 10, 5, 0, 0, time.UTC) }
 	presStore.Add("talk-b", bytes.NewReader(mustZip(map[string]string{"x": "2"})))
 
-	handler := HandleListPresentations(presStore)
-	ts := httptest.NewServer(http.HandlerFunc(handler))
-	defer ts.Close()
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations", nil)
+	resp := httptest.NewRecorder()
+	HandleListPresentations(presStore)(resp, req)
 
-	resp, err := http.Get(ts.URL + "/api/presentations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
 	}
 
 	var result struct {
@@ -220,19 +229,15 @@ func TestHandleDeletePresentation(t *testing.T) {
 
 	presStore.Add("to-delete", bytes.NewReader(mustZip(map[string]string{"x": "1"})))
 
-	handler := HandleDeletePresentation(presStore)
-	ts := httptest.NewServer(http.HandlerFunc(handler))
-	defer ts.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/presentations/{name}", HandleDeletePresentation(presStore))
 
-	req, _ := http.NewRequest("DELETE", ts.URL+"/api/presentations/to-delete", nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req, _ := http.NewRequest(http.MethodDelete, "/api/presentations/to-delete", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
 	}
 
 	// Verify it's gone
@@ -254,21 +259,15 @@ func TestHandleServePresentation(t *testing.T) {
 	os.MkdirAll(filepath.Join(presDir, "css"), 0755)
 	os.WriteFile(filepath.Join(presDir, "css", "style.css"), []byte("body{}"), 0644)
 
+	// Test serving index.html
+	req := httptest.NewRequest(http.MethodGet, "/p/my-pres/", nil)
+	resp := httptest.NewRecorder()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/p/{name}/", HandleServePresentation(tmpDir))
+	mux.ServeHTTP(resp, req)
 
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	// Test serving index.html
-	resp, err := http.Get(ts.URL + "/p/my-pres/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "Hello") {
@@ -276,14 +275,12 @@ func TestHandleServePresentation(t *testing.T) {
 	}
 
 	// Test serving subdirectory file
-	resp2, err := http.Get(ts.URL + "/p/my-pres/css/style.css")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
+	req2 := httptest.NewRequest(http.MethodGet, "/p/my-pres/css/style.css", nil)
+	resp2 := httptest.NewRecorder()
+	mux.ServeHTTP(resp2, req2)
 
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	if resp2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp2.Code)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
 	if string(body2) != "body{}" {
@@ -291,13 +288,11 @@ func TestHandleServePresentation(t *testing.T) {
 	}
 
 	// Test non-existent presentation
-	resp3, err := http.Get(ts.URL + "/p/nonexistent/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", resp3.StatusCode)
+	req3 := httptest.NewRequest(http.MethodGet, "/p/nonexistent/", nil)
+	resp3 := httptest.NewRecorder()
+	mux.ServeHTTP(resp3, req3)
+	if resp3.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp3.Code)
 	}
 }
 
@@ -312,22 +307,15 @@ func TestHandleServePresentationPathTraversal(t *testing.T) {
 	// Create a file outside the presentation dir
 	os.WriteFile(filepath.Join(tmpDir, "secret.txt"), []byte("secret"), 0644)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/p/{name}/", HandleServePresentation(tmpDir))
-
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
 	// Try path traversal: /p/safe/../secret.txt should not work
-	resp, err := http.Get(ts.URL + "/p/safe/../secret.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	req := httptest.NewRequest(http.MethodGet, "/p/safe/../secret.txt", nil)
+	req.SetPathValue("name", "safe")
+	resp := httptest.NewRecorder()
+	HandleServePresentation(tmpDir)(resp, req)
 
 	// Path traversal should result in 403 Forbidden
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 403/404 for traversal, got %d", resp.StatusCode)
+	if resp.Code != http.StatusForbidden && resp.Code != http.StatusNotFound {
+		t.Errorf("expected 403/404 for traversal, got %d", resp.Code)
 	}
 }
 
