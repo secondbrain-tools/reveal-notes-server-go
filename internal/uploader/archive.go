@@ -1,0 +1,151 @@
+package uploader
+
+import (
+	"archive/zip"
+	"bytes"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type ArchiveOptions struct {
+	SourceDir      string
+	HTMLFile       string
+	IgnorePatterns []string
+}
+
+func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
+	if opts.SourceDir == "" {
+		return nil, fmt.Errorf("source directory is required")
+	}
+	if opts.HTMLFile == "" {
+		return nil, fmt.Errorf("html file path is required")
+	}
+
+	sourceAbs, err := filepath.Abs(opts.SourceDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source directory: %w", err)
+	}
+	sourceAbs = filepath.Clean(sourceAbs)
+	if stat, err := os.Stat(sourceAbs); err != nil {
+		return nil, fmt.Errorf("source directory %q: %w", opts.SourceDir, err)
+	} else if !stat.IsDir() {
+		return nil, fmt.Errorf("source directory %q is not a directory", opts.SourceDir)
+	}
+
+	htmlAbs, err := resolveHTMLFilePath(sourceAbs, opts.HTMLFile)
+	if err != nil {
+		return nil, err
+	}
+	htmlAbs = filepath.Clean(htmlAbs)
+	htmlInfo, err := os.Lstat(htmlAbs)
+	if err != nil {
+		return nil, fmt.Errorf("html file %q: %w", opts.HTMLFile, err)
+	}
+	if htmlInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("html file %q must not be a symlink", opts.HTMLFile)
+	}
+	if htmlInfo.IsDir() {
+		return nil, fmt.Errorf("html file %q is a directory", opts.HTMLFile)
+	}
+
+	htmlRel, err := filepath.Rel(sourceAbs, htmlAbs)
+	if err != nil || htmlRel == ".." || strings.HasPrefix(htmlRel, ".."+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("html file %q must be inside source directory %q", opts.HTMLFile, opts.SourceDir)
+	}
+
+	matcher, err := NewIgnoreMatcher(opts.IgnorePatterns)
+	if err != nil {
+		return nil, err
+	}
+	if ignored, err := matcher.Ignored(filepath.ToSlash(htmlRel), false); err != nil {
+		return nil, err
+	} else if ignored {
+		return nil, fmt.Errorf("selected html file %q is ignored by --ignore", opts.HTMLFile)
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	seen := map[string]struct{}{}
+	walkErr := filepath.WalkDir(sourceAbs, func(current string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == sourceAbs {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinks are not supported: %s", current)
+		}
+
+		rel, err := filepath.Rel(sourceAbs, current)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		ignored, err := matcher.Ignored(relSlash, d.IsDir())
+		if err != nil {
+			return err
+		}
+		if ignored {
+			return nil
+		}
+
+		entryName := relSlash
+		if d.IsDir() {
+			entryName += "/"
+		} else if current == htmlAbs {
+			entryName = "index.html"
+		}
+
+		if _, exists := seen[entryName]; exists {
+			return fmt.Errorf("duplicate zip entry %q", entryName)
+		}
+		seen[entryName] = struct{}{}
+
+		if d.IsDir() {
+			_, err := zw.Create(entryName)
+			return err
+		}
+
+		f, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+
+		w, err := zw.Create(entryName)
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		if _, err := io.Copy(w, f); err != nil {
+			_ = f.Close()
+			return err
+		}
+		return f.Close()
+	})
+	if walkErr != nil {
+		_ = zw.Close()
+		return nil, walkErr
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func resolveHTMLFilePath(sourceAbs, htmlFile string) (string, error) {
+	if filepath.IsAbs(htmlFile) {
+		return htmlFile, nil
+	}
+	return filepath.Join(sourceAbs, htmlFile), nil
+}
