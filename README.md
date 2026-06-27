@@ -15,7 +15,7 @@ The notes server enables a "speaker view" for reveal.js presentations. As you na
 ## Quick Start
 
 ```bash
-make build
+make
 ./notes-server
 ```
 
@@ -44,7 +44,7 @@ Then open the slides at the URL shown in the startup banner, open your browser's
 ### Targets
 
 ```bash
-make                  # Build for current platform
+make                  # Build both binaries for current platform
 make build-linux-amd64
 make build-linux-arm64
 make build-windows-amd64

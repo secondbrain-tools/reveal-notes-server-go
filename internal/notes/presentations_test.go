@@ -45,6 +45,17 @@ func TestValidatePresentationName(t *testing.T) {
 	if err := ValidatePresentationName("talk-1"); err != nil {
 		t.Fatalf("expected valid name: %v", err)
 	}
+
+	longValid := strings.Repeat("a", 255)
+	if err := ValidatePresentationName(longValid); err != nil {
+		t.Fatalf("expected 255-char name to be valid: %v", err)
+	}
+
+	longInvalid := strings.Repeat("a", 256)
+	if err := ValidatePresentationName(longInvalid); err == nil {
+		t.Fatalf("expected 256-char name to be invalid")
+	}
+
 	for _, name := range []string{"", "../evil", "bad/name"} {
 		if err := ValidatePresentationName(name); err == nil {
 			t.Fatalf("expected invalid name %q", name)

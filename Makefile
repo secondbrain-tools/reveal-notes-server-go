@@ -21,8 +21,13 @@ GOARM         ?=
 GO_ENV        := $(if $(GOOS),GOOS=$(GOOS) )$(if $(GOARCH),GOARCH=$(GOARCH) )$(if $(GOARM),GOARM=$(GOARM) )
 
 # ------------------------------------------------------------------
-# Default target: build for the current platform
+# Default target: build both binaries for the current platform
 # ------------------------------------------------------------------
+.DEFAULT_GOAL := all
+
+.PHONY: all
+all: build build-upload
+
 .PHONY: build
 build:
 	$(GO_ENV)$(GO) build $(GOFLAGS) -o $(BINARY)$(if $(filter windows,$(GOOS)),.exe) $(CMD_DIR)
@@ -30,6 +35,7 @@ build:
 .PHONY: build-upload
 build-upload:
 	$(GO_ENV)$(GO) build $(GOFLAGS) -o $(UPLOAD_BINARY)$(if $(filter windows,$(GOOS)),.exe) $(UPLOAD_CMD_DIR)
+
 # ------------------------------------------------------------------
 # Convenience targets — single-platform builds
 # ------------------------------------------------------------------
