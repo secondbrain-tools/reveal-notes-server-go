@@ -24,7 +24,6 @@ func TestUploadToNotesServerWithBearerAuth(t *testing.T) {
 	server := notes.NewServer(notes.ServerConfig{
 		Hostname:          "127.0.0.1",
 		Port:              0,
-		RevealDir:         siteDir,
 		PresentationDir:   presentationDir,
 		PresentationIndex: "/index.html",
 		PresentationsDir:  uploadsDir,

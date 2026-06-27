@@ -10,7 +10,7 @@ The notes server enables a "speaker view" for reveal.js presentations. As you na
 - **Speaker view** at `/notes/{socketId}` — individual note-taking page per session
 - **JSON API** at `/notes/sessions` — machine-readable session list
 - **Health endpoint** at `/health` — liveness check
-- **Static file serving** for both reveal.js assets and exported presentation files
+- **Static file serving** for exported presentation files
 
 ## Quick Start
 
@@ -27,7 +27,6 @@ Then open the slides at the URL shown in the startup banner, open your browser's
 |---|---|---|
 | `--hostname` | `127.0.0.1` | Hostname to bind |
 | `--port` | `1947` | Port to listen on |
-| `--revealDir` | CWD | Directory containing reveal.js |
 | `--presentationDir` | `.` | Directory containing the presentation |
 | `--presentationIndex` | `/index.html` | Presentation entry point |
 | `--activeTtlMs` | `7200000` | Session TTL in milliseconds (2h) |
@@ -81,7 +80,6 @@ remote-notes-server/
 ├── cmd/
 │   └── notes-server/
 │       └── main.go          # Entry point — parses flags, starts server
-├── notes-server.js          # Node.js implementation (alternative server)
 ├── manifest.yaml            # Runtime manifest for the publisher
 └── internal/
     └── notes/
@@ -89,6 +87,8 @@ remote-notes-server/
         ├── sessions.go      # Thread-safe session store with TTL pruning
         ├── handlers.go      # HTTP handlers — dashboard, speaker view, JSON API
         ├── templates.go     # Embedded speaker view HTML (//go:embed)
+        ├── static/
+        │   └── socket.io.min.js  # Embedded Socket.IO client asset
         ├── presentations.go # Presentation upload/serve store & handlers
         ├── index.html       # Speaker view template
         ├── server_test.go

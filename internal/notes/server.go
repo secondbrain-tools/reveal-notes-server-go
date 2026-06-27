@@ -6,7 +6,6 @@ import (
 	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,10 +18,8 @@ import (
 type ServerConfig struct {
 	Hostname          string
 	Port              int
-	RevealDir         string
 	PresentationDir   string
 	PresentationIndex string
-	PluginDir         string
 	ActiveTtlMs       int
 	PresentationsDir  string // directory for uploaded presentations
 	PresentationTtlMs int    // TTL for uploaded presentations in milliseconds
@@ -173,7 +170,6 @@ func NewServer(cfg ServerConfig) *Server {
 	})
 
 	// Static file serving and root handler
-	revealFS := http.FileServer(http.Dir(cfg.RevealDir))
 	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))
 	rootHandler := HandleRoot(cfg.PresentationDir, cfg.PresentationIndex)
 
@@ -182,16 +178,8 @@ func NewServer(cfg ServerConfig) *Server {
 			rootHandler(w, r)
 			return
 		}
-		// Try revealDir first, then presentationDir
-		revealPath := filepath.Join(cfg.RevealDir, r.URL.Path)
-		presPath := filepath.Join(cfg.PresentationDir, r.URL.Path)
-		if _, err := os.Stat(revealPath); err == nil {
-			revealFS.ServeHTTP(w, r)
-		} else if _, err := os.Stat(presPath); err == nil {
-			presentationFS.ServeHTTP(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
+
+		presentationFS.ServeHTTP(w, r)
 	})
 
 	srv.Mux = mux

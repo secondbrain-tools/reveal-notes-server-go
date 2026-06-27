@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-//go:embed socket.io.min.js
+//go:embed static/socket.io.min.js
 var socketIOClientJS []byte
 
 // HandleSocketIOClient serves the embedded Socket.IO client library.

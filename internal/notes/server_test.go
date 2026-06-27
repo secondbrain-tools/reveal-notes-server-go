@@ -32,10 +32,8 @@ func newTestServer(t *testing.T) *testServer {
 	cfg := ServerConfig{
 		Hostname:          "127.0.0.1",
 		Port:              0, // not used with httptest
-		RevealDir:         tmpDir,
 		PresentationDir:   tmpDir,
 		PresentationIndex: "/index.html",
-		PluginDir:         "./node_modules/remote-notes-server",
 		ActiveTtlMs:       7200000,
 	}
 
@@ -72,7 +70,6 @@ func TestNewServerAppliesDefaults(t *testing.T) {
 	cfg := ServerConfig{
 		Hostname:        "127.0.0.1",
 		Port:            0,
-		RevealDir:       t.TempDir(),
 		PresentationDir: t.TempDir(),
 	}
 
@@ -263,10 +260,8 @@ func TestStaticFileServing(t *testing.T) {
 	cfg := ServerConfig{
 		Hostname:          "127.0.0.1",
 		Port:              0,
-		RevealDir:         tmpDir,
 		PresentationDir:   tmpDir,
 		PresentationIndex: "/index.html",
-		PluginDir:         "./node_modules/remote-notes-server",
 		ActiveTtlMs:       7200000,
 	}
 
@@ -319,10 +314,8 @@ func TestListenAndServe(t *testing.T) {
 	cfg := ServerConfig{
 		Hostname:          "127.0.0.1",
 		Port:              0, // port 0 isn't valid for ListenAndServe since it uses port 0 string
-		RevealDir:         t.TempDir(),
 		PresentationDir:   t.TempDir(),
 		PresentationIndex: "/index.html",
-		PluginDir:         "./node_modules/remote-notes-server",
 		ActiveTtlMs:       7200000,
 	}
 
