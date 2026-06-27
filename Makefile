@@ -26,6 +26,9 @@ GO_ENV        := $(if $(GOOS),GOOS=$(GOOS) )$(if $(GOARCH),GOARCH=$(GOARCH) )$(i
 .PHONY: build
 build:
 	$(GO_ENV)$(GO) build $(GOFLAGS) -o $(BINARY)$(if $(filter windows,$(GOOS)),.exe) $(CMD_DIR)
+
+.PHONY: build-upload
+build-upload:
 	$(GO_ENV)$(GO) build $(GOFLAGS) -o $(UPLOAD_BINARY)$(if $(filter windows,$(GOOS)),.exe) $(UPLOAD_CMD_DIR)
 # ------------------------------------------------------------------
 # Convenience targets — single-platform builds

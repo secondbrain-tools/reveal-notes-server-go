@@ -15,7 +15,7 @@ import (
 )
 
 func TestIgnoreMatcher(t *testing.T) {
-	matcher, err := NewIgnoreMatcher([]string{"*.map", "dist/", "!dist/keep.map"})
+	matcher, err := NewIgnoreMatcher([]string{"*.map", "dist/", "!dist/keep.map", `\!literal.txt`, `\#literal.txt`})
 	if err != nil {
 		t.Fatalf("NewIgnoreMatcher: %v", err)
 	}
@@ -30,6 +30,8 @@ func TestIgnoreMatcher(t *testing.T) {
 		{name: "dir pattern matches directory", path: "dist", isDir: true, want: true},
 		{name: "dir pattern matches descendants", path: "dist/app.js", want: true},
 		{name: "negated file re-includes", path: "dist/keep.map", want: false},
+		{name: "escaped leading bang matches literally", path: "!literal.txt", want: true},
+		{name: "escaped leading hash matches literally", path: "#literal.txt", want: true},
 	}
 
 	for _, tc := range tests {
@@ -100,6 +102,17 @@ func TestBuildArchiveValidation(t *testing.T) {
 		_, err := BuildArchive(ArchiveOptions{SourceDir: source, HTMLFile: filepath.Join("pages", "presentation.html")})
 		if err == nil || !strings.Contains(err.Error(), "duplicate zip entry \"index.html\"") {
 			t.Fatalf("expected duplicate entry error, got %v", err)
+		}
+	})
+
+	t.Run("rename conflicts with existing directory", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "index.html", "nested.txt"), []byte("nested"))
+		mustWriteFile(t, filepath.Join(source, "pages", "presentation.html"), []byte("presentation"))
+
+		_, err := BuildArchive(ArchiveOptions{SourceDir: source, HTMLFile: filepath.Join("pages", "presentation.html")})
+		if err == nil || !strings.Contains(err.Error(), "conflicts with existing") {
+			t.Fatalf("expected conflict error, got %v", err)
 		}
 	})
 }

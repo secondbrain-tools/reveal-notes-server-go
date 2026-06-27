@@ -69,8 +69,8 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
+	tracker := newZipEntryTracker()
 
-	seen := map[string]struct{}{}
 	walkErr := filepath.WalkDir(sourceAbs, func(current string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -101,16 +101,17 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 		}
 
 		entryName := relSlash
+		entryKind := zipEntryFile
 		if d.IsDir() {
 			entryName += "/"
+			entryKind = zipEntryDir
 		} else if current == htmlAbs {
 			entryName = "index.html"
 		}
 
-		if _, exists := seen[entryName]; exists {
-			return fmt.Errorf("duplicate zip entry %q", entryName)
+		if err := tracker.add(entryName, entryKind); err != nil {
+			return err
 		}
-		seen[entryName] = struct{}{}
 
 		if d.IsDir() {
 			_, err := zw.Create(entryName)
@@ -148,4 +149,62 @@ func resolveHTMLFilePath(sourceAbs, htmlFile string) (string, error) {
 		return htmlFile, nil
 	}
 	return filepath.Join(sourceAbs, htmlFile), nil
+}
+
+type zipEntryKind int
+
+const (
+	zipEntryDir zipEntryKind = iota
+	zipEntryFile
+)
+
+type zipEntryTracker struct {
+	entries map[string]zipEntryKind
+}
+
+func newZipEntryTracker() *zipEntryTracker {
+	return &zipEntryTracker{entries: make(map[string]zipEntryKind)}
+}
+
+func (t *zipEntryTracker) add(entryName string, kind zipEntryKind) error {
+	cleaned := strings.TrimSuffix(entryName, "/")
+	if cleaned == "" {
+		return fmt.Errorf("invalid zip entry %q", entryName)
+	}
+
+	if existingKind, ok := t.entries[cleaned]; ok {
+		if existingKind == kind {
+			return fmt.Errorf("duplicate zip entry %q", entryName)
+		}
+		if kind == zipEntryFile {
+			return fmt.Errorf("zip entry %q conflicts with existing directory %q", entryName, cleaned)
+		}
+		return fmt.Errorf("zip entry %q conflicts with existing file %q", entryName, cleaned)
+	}
+
+	for existingPath, existingKind := range t.entries {
+		switch kind {
+		case zipEntryFile:
+			if pathHasPrefix(existingPath, cleaned) {
+				if existingKind == zipEntryDir {
+					return fmt.Errorf("zip entry %q conflicts with existing directory %q", entryName, existingPath)
+				}
+				return fmt.Errorf("zip entry %q conflicts with existing file %q", entryName, existingPath)
+			}
+			if existingKind == zipEntryFile && pathHasPrefix(cleaned, existingPath) {
+				return fmt.Errorf("zip entry %q conflicts with existing file %q", entryName, existingPath)
+			}
+		case zipEntryDir:
+			if existingKind == zipEntryFile && pathHasPrefix(cleaned, existingPath) {
+				return fmt.Errorf("zip entry %q conflicts with existing file %q", entryName, existingPath)
+			}
+		}
+	}
+
+	t.entries[cleaned] = kind
+	return nil
+}
+
+func pathHasPrefix(value, prefix string) bool {
+	return value == prefix || strings.HasPrefix(value, prefix+"/")
 }

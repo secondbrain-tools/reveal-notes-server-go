@@ -37,10 +37,12 @@ func NewIgnoreMatcher(patterns []string) (*IgnoreMatcher, error) {
 func parseIgnoreRule(raw string) (ignoreRule, error) {
 	rule := ignoreRule{raw: raw}
 
+	escapedLeading := false
 	if strings.HasPrefix(raw, `\!`) || strings.HasPrefix(raw, `\#`) {
+		escapedLeading = true
 		raw = raw[1:]
 	}
-	if strings.HasPrefix(raw, "!") {
+	if !escapedLeading && strings.HasPrefix(raw, "!") {
 		rule.negated = true
 		raw = raw[1:]
 	}
