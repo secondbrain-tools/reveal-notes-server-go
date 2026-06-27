@@ -51,6 +51,7 @@ make build-windows-amd64
 make build-darwin-amd64    # Intel Mac
 make build-darwin-arm64    # Apple Silicon (M1/M2/M3)
 make cross             # Build all platforms into dist/
+make build-upload         # Build the upload CLI
 make run               # Build and run
 make test              # Run tests
 make vet               # Run static analysis
@@ -131,6 +132,7 @@ Individual speaker view page for a specific session.
 ### `POST /api/presentations/{name}`
 
 Upload a zip file containing a self-contained reveal.js presentation. Requires `Authorization: Bearer <token>` if `--accessToken` is set. Accepts multipart form with field name `file`.
+The upload CLI packages the source folder and sends this request automatically.
 
 ```bash
 curl -F "file=@presentation.zip" http://localhost:1947/api/presentations/my-talk
@@ -200,6 +202,25 @@ curl -H "Authorization: Bearer my-secret-token" \
 curl -F "file=@my-talk.zip" http://localhost:1947/api/presentations/my-talk
 # → {"error":"unauthorized"}
 ```
+
+## Upload CLI
+
+A local helper binary is available for packaging and uploading exported presentations.
+It walks a source folder, renames the chosen HTML entry file to `index.html`, preserves the other relative paths, and applies repeatable gitignore-style `--ignore` patterns.
+
+```bash
+make build-upload
+./upload-presentation \
+  --server-url=http://host:1947 \
+  --name=my-talk \
+  --source=./output \
+  --html=index.html \
+  --access-token=my-secret-token \
+  --ignore='*.map' \
+  --ignore='node_modules/'
+```
+
+The uploader is meant for local/developer use only and is not part of the runtime manifest.
 
 ## Presentation Upload & Serving
 

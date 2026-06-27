@@ -8,16 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
-
-// validPresentationName matches alphanumeric names with dots, underscores, hyphens.
-// Must start with a letter or digit, max 64 characters.
-var validPresentationName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
 // requireAccessToken returns a middleware that checks the Authorization header.
 // If the token is empty, the check is skipped (no auth required).
@@ -77,8 +72,8 @@ func NewPresentationStore(dir string, ttl time.Duration) *PresentationStore {
 // Add extracts a zip archive from r into the presentation directory named name.
 // If a presentation with the same name already exists, it is replaced.
 func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error) {
-	if !validPresentationName.MatchString(name) {
-		return nil, fmt.Errorf("invalid presentation name: %q", name)
+	if err := ValidatePresentationName(name); err != nil {
+		return nil, err
 	}
 
 	ps.mu.Lock()
@@ -245,6 +240,11 @@ func HandleUploadPresentation(store *PresentationStore) http.HandlerFunc {
 			return
 		}
 
+		if err := ValidatePresentationName(name); err != nil {
+			http.Error(w, "Invalid presentation name", http.StatusBadRequest)
+			return
+		}
+
 		// Limit upload to 100MB
 		r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
 
@@ -265,11 +265,6 @@ func HandleUploadPresentation(store *PresentationStore) http.HandlerFunc {
 		if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") &&
 			header.Header.Get("Content-Type") != "application/zip" {
 			http.Error(w, "Upload must be a zip file", http.StatusBadRequest)
-			return
-		}
-
-		if !validPresentationName.MatchString(name) {
-			http.Error(w, "Invalid presentation name", http.StatusBadRequest)
 			return
 		}
 
@@ -343,7 +338,7 @@ func HandleServePresentation(presentationsDir string) http.HandlerFunc {
 			return
 		}
 
-		if !validPresentationName.MatchString(name) {
+		if err := ValidatePresentationName(name); err != nil {
 			http.Error(w, "Invalid presentation name", http.StatusBadRequest)
 			return
 		}

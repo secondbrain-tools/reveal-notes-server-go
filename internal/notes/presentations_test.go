@@ -41,6 +41,17 @@ func TestRequireAccessToken(t *testing.T) {
 	}
 }
 
+func TestValidatePresentationName(t *testing.T) {
+	if err := ValidatePresentationName("talk-1"); err != nil {
+		t.Fatalf("expected valid name: %v", err)
+	}
+	for _, name := range []string{"", "../evil", "bad/name"} {
+		if err := ValidatePresentationName(name); err == nil {
+			t.Fatalf("expected invalid name %q", name)
+		}
+	}
+}
+
 // createZip creates an in-memory zip with the given files.
 func createZip(files map[string]string) ([]byte, error) {
 	var buf bytes.Buffer
