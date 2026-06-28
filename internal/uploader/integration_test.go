@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +50,9 @@ func TestUploadToNotesServerWithBearerAuth(t *testing.T) {
 	}
 
 	client := ts.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
 	resp, err := UploadPresentation(context.Background(), client, ts.URL, "my-talk", archive, "secret-token")
 	if err != nil {
 		t.Fatalf("UploadPresentation: %v", err)
@@ -95,6 +100,23 @@ func TestUploadToNotesServerWithBearerAuth(t *testing.T) {
 	if listResult.Count != 1 || len(listResult.Presentations) != 1 || listResult.Presentations[0].Name != "my-talk" {
 		t.Fatalf("unexpected list result: %+v", listResult)
 	}
+
+	loginForm := url.Values{}
+	loginForm.Set("token", "secret-token")
+	loginForm.Set("returnTo", "/p/my-talk/")
+	loginReq, err := http.NewRequest(http.MethodPost, ts.URL+"/login", strings.NewReader(loginForm.Encode()))
+	if err != nil {
+		t.Fatalf("new login request: %v", err)
+	}
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		t.Fatalf("login request: %v", err)
+	}
+	if loginResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status = %s", loginResp.Status)
+	}
+	loginResp.Body.Close()
 
 	renderResp, err := client.Get(ts.URL + "/p/my-talk/")
 	if err != nil {

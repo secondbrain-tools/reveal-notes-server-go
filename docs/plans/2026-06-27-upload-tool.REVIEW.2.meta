@@ -1,0 +1,8 @@
+{
+  "orchestrator": {
+    "review": {
+      "reviewCycleId": "c3df20fc-531e-4b6a-a6bd-c43846a7f85e:auto_review",
+      "outcome": "issues"
+    }
+  }
+}

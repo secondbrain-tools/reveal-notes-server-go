@@ -1,0 +1,83 @@
+{
+  "externalFlow": {
+    "metaVersion": 2,
+    "version": 1,
+    "runId": "1488bd75-1960-47c1-805e-a3a4d869368e",
+    "cwd": "/home/st6ka8/Code/Publisher/remote-notes-server",
+    "workflowSelectionId": "orchestrator-default",
+    "workflowId": "orchestrator-default",
+    "planFilePath": "docs/plans/2026-06-27-auto-cleanup.md",
+    "planName": "Auto Cleanup",
+    "selectedModelGroupId": "openai",
+    "currentStepId": null,
+    "status": "done",
+    "startedAt": "2026-06-27T16:51:53.193Z",
+    "updatedAt": "2026-06-27T18:11:01.607Z",
+    "lastOutcome": "success",
+    "lastFailure": {
+      "stepId": "human_review",
+      "sessionId": "019f0a46-efeb-761f-8c03-4bff43ae1f8a",
+      "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T18-10-48-939Z_019f0a46-efeb-761f-8c03-4bff43ae1f8a.jsonl",
+      "stopReason": "stop",
+      "timestamp": "2026-06-27T18:11:01.584Z"
+    },
+    "toolRuntimeIssue": null,
+    "pauseRequested": false,
+    "externalStepOnly": false,
+    "sessionStrategy": "fresh",
+    "sessionRecords": [
+      {
+        "stepId": "planning",
+        "sessionId": "019f09fe-c1b9-72e1-9cab-b934ee56b876",
+        "status": "done",
+        "startedAt": "2026-06-27T16:51:53.238Z",
+        "updatedAt": "2026-06-27T17:04:31.851Z",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T16-51-58-522Z_019f09fe-c1b9-72e1-9cab-b934ee56b876.jsonl",
+        "outcome": "rejected",
+        "endedAt": "2026-06-27T17:04:31.851Z"
+      },
+      {
+        "stepId": "planning",
+        "sessionId": "019f0a0a-4084-746f-bfc8-1e59e92d57ed",
+        "status": "done",
+        "startedAt": "2026-06-27T17:04:31.875Z",
+        "updatedAt": "2026-06-27T17:55:10.505Z",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T17-04-31-876Z_019f0a0a-4084-746f-bfc8-1e59e92d57ed.jsonl",
+        "outcome": "success",
+        "endedAt": "2026-06-27T17:55:10.505Z"
+      },
+      {
+        "stepId": "executing",
+        "sessionId": "019f0a38-9e4c-73d9-91c5-4b5294511250",
+        "status": "done",
+        "startedAt": "2026-06-27T17:55:10.540Z",
+        "updatedAt": "2026-06-27T18:06:14.368Z",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T17-55-10-540Z_019f0a38-9e4c-73d9-91c5-4b5294511250.jsonl",
+        "outcome": "success",
+        "endedAt": "2026-06-27T18:06:14.368Z"
+      },
+      {
+        "stepId": "auto_review",
+        "sessionId": "019f0a42-bf8b-741d-b4e6-3e99ceb7bd59",
+        "status": "done",
+        "startedAt": "2026-06-27T18:06:14.409Z",
+        "updatedAt": "2026-06-27T18:10:48.909Z",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T18-06-14-411Z_019f0a42-bf8b-741d-b4e6-3e99ceb7bd59.jsonl",
+        "outcome": "success",
+        "endedAt": "2026-06-27T18:10:48.909Z"
+      },
+      {
+        "stepId": "human_review",
+        "sessionId": "019f0a46-efeb-761f-8c03-4bff43ae1f8a",
+        "status": "done",
+        "startedAt": "2026-06-27T18:10:48.938Z",
+        "updatedAt": "2026-06-27T18:11:01.607Z",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T18-10-48-939Z_019f0a46-efeb-761f-8c03-4bff43ae1f8a.jsonl",
+        "outcome": "success",
+        "endedAt": "2026-06-27T18:11:01.607Z"
+      }
+    ],
+    "checklistItems": [],
+    "loopIterationCount": 1
+  }
+}

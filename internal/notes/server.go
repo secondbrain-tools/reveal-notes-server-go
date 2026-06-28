@@ -128,6 +128,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
+	auth := newBrowserAuth(cfg.AccessToken)
 
 	// API endpoints for presentation upload/management (auth-protected)
 	mux.HandleFunc("POST /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleUploadPresentation(presStore)))
@@ -135,52 +136,49 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("GET /api/presentations", requireAccessToken(cfg.AccessToken, HandleListPresentations(presStore)))
 	mux.HandleFunc("DELETE /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleDeletePresentation(presStore)))
 
+	// Browser auth entry points.
+	mux.HandleFunc("GET /login", auth.loginHandler())
+	mux.HandleFunc("POST /login", auth.loginHandler())
+	mux.HandleFunc("GET /logout", auth.logoutHandler())
+	mux.HandleFunc("POST /logout", auth.logoutHandler())
+
 	// Serve uploaded presentations at /p/{name}/...
-	mux.HandleFunc("/p/{name}/", HandleServePresentation(cfg.PresentationsDir))
+	mux.HandleFunc("/p/{name}/", auth.wrapPage(HandleServePresentation(cfg.PresentationsDir)))
 
 	// Redirect /p/{name} to /p/{name}/
-	mux.HandleFunc("GET /p/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /p/{name}", auth.wrapPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		http.Redirect(w, r, "/p/"+name+"/", http.StatusMovedPermanently)
-	})
+	})))
 
 	// Socket.IO handler
-
 	// Serve the embedded Socket.IO client library
-	mux.HandleFunc("GET /socket.io/socket.io.js", HandleSocketIOClient)
-	mux.Handle("/socket.io/", sio.ServeHandler(nil))
+	mux.HandleFunc("GET /socket.io/socket.io.js", auth.wrapPage(http.HandlerFunc(HandleSocketIOClient)))
+	mux.Handle("/socket.io/", auth.wrapSocket(sio.ServeHandler(nil)))
 
 	// Health check
 	mux.HandleFunc("/health", HandleHealth)
 
 	// Sessions JSON endpoint
-	mux.HandleFunc("/notes/sessions", HandleSessionsJSON(store, activeTtl, int64(cfg.ActiveTtlMs)))
+	mux.HandleFunc("GET /notes/sessions", auth.wrapPage(HandleSessionsJSON(store, activeTtl, int64(cfg.ActiveTtlMs))))
 
-	// Dashboard and speaker view (/notes handles both /notes and /notes/:socketId)
-	mux.HandleFunc("/notes/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/notes" || r.URL.Path == "/notes/" {
-			HandleDashboard(store, activeTtl)(w, r)
-			return
-		}
-		if r.URL.Path == "/notes/sessions" {
-			HandleSessionsJSON(store, activeTtl, int64(cfg.ActiveTtlMs))(w, r)
-			return
-		}
-		HandleSpeakerView(store, cfg.PresentationsDir)(w, r)
-	})
+	// Dashboard and speaker view
+	dashboardHandler := auth.wrapPage(HandleDashboard(store, activeTtl))
+	mux.HandleFunc("GET /notes", dashboardHandler)
+	mux.HandleFunc("GET /notes/", dashboardHandler)
+	mux.HandleFunc("GET /notes/{socketId}", auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir)))
 
 	// Static file serving and root handler
 	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))
 	rootHandler := HandleRoot(cfg.PresentationDir, cfg.PresentationIndex)
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", auth.wrapPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			rootHandler(w, r)
 			return
 		}
 
 		presentationFS.ServeHTTP(w, r)
-	})
+	})))
 
 	srv.Mux = mux
 

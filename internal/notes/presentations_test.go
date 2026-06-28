@@ -156,7 +156,11 @@ func TestHandleUploadPresentationReplacesExisting(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/presentations/{name}", HandleUploadPresentation(presStore))
 
+	firstTime := time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC)
+	secondTime := firstTime.Add(1 * time.Hour)
+
 	// Upload first version
+	presStore.now = func() time.Time { return firstTime }
 	files1 := map[string]string{"index.html": "v1"}
 	zip1, _ := createZip(files1)
 	body1, ct1 := createMultipartBody("file", "pres.zip", zip1)
@@ -166,6 +170,7 @@ func TestHandleUploadPresentationReplacesExisting(t *testing.T) {
 	mux.ServeHTTP(resp1, req1)
 
 	// Upload second version (replaces)
+	presStore.now = func() time.Time { return secondTime }
 	files2 := map[string]string{"index.html": "v2"}
 	zip2, _ := createZip(files2)
 	body2, ct2 := createMultipartBody("file", "pres.zip", zip2)
@@ -177,6 +182,24 @@ func TestHandleUploadPresentationReplacesExisting(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(tmpDir, "test", "index.html"))
 	if string(content) != "v2" {
 		t.Errorf("expected v2 after replace, got %q", string(content))
+	}
+
+	metadataBytes, err := os.ReadFile(filepath.Join(tmpDir, "test", presentationMetadataFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata Presentation
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != "test" {
+		t.Fatalf("expected metadata name test, got %q", metadata.Name)
+	}
+	if !metadata.CreatedAt.Equal(secondTime) {
+		t.Fatalf("expected metadata createdAt %v, got %v", secondTime, metadata.CreatedAt)
+	}
+	if metadata.Size != int64(len(zip2)) {
+		t.Fatalf("expected metadata size %d, got %d", len(zip2), metadata.Size)
 	}
 }
 
@@ -371,6 +394,104 @@ func TestPresentationPruning(t *testing.T) {
 	}
 }
 
+func TestPresentationStoreReloadsPersistedMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	baseTime := time.Now().UTC()
+
+	store := NewPresentationStore(tmpDir, 24*time.Hour)
+	store.now = func() time.Time { return baseTime }
+
+	zipData, _ := createZip(map[string]string{"index.html": "<html>Reload</html>"})
+	pres, err := store.Add("reload-me", bytes.NewReader(zipData))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadataBytes, err := os.ReadFile(filepath.Join(tmpDir, "reload-me", presentationMetadataFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata Presentation
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != pres.Name || !metadata.CreatedAt.Equal(pres.CreatedAt) || metadata.Size != pres.Size {
+		t.Fatalf("unexpected metadata: %+v vs %+v", metadata, pres)
+	}
+
+	reloaded := NewPresentationStore(tmpDir, 24*time.Hour)
+	list := reloaded.List()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 presentation after reload, got %d", len(list))
+	}
+	if list[0].Name != "reload-me" {
+		t.Fatalf("expected reload-me after reload, got %q", list[0].Name)
+	}
+	if list[0].CreatedAt != pres.CreatedAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("expected createdAt %s, got %s", pres.CreatedAt.UTC().Format(time.RFC3339), list[0].CreatedAt)
+	}
+	if list[0].Size != pres.Size {
+		t.Fatalf("expected size %d, got %d", pres.Size, list[0].Size)
+	}
+}
+
+func TestPresentationStoreStartupCleanupRemovesInvalidAndExpiredEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now().UTC()
+	ttl := 30 * time.Minute
+
+	createStoredPresentation(t, tmpDir, "keep", Presentation{
+		Name:      "keep",
+		CreatedAt: now.Add(-10 * time.Minute),
+		Size:      1234,
+	})
+	createStoredPresentation(t, tmpDir, "expired", Presentation{
+		Name:      "expired",
+		CreatedAt: now.Add(-2 * time.Hour),
+		Size:      4321,
+	})
+	brokenDir := filepath.Join(tmpDir, "broken")
+	if err := os.MkdirAll(brokenDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenDir, presentationMetadataFilename), []byte("not-json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPresentationStore(tmpDir, ttl)
+
+	list := store.List()
+	if len(list) != 1 || list[0].Name != "keep" {
+		t.Fatalf("expected only keep after startup cleanup, got %+v", list)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "expired")); !os.IsNotExist(err) {
+		t.Fatalf("expired presentation should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(brokenDir); !os.IsNotExist(err) {
+		t.Fatalf("broken presentation should be removed, stat err=%v", err)
+	}
+}
+
+func TestPresentationStoreRemoveDeletesStaleOnDiskEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewPresentationStore(tmpDir, 24*time.Hour)
+
+	createStoredPresentation(t, tmpDir, "stale", Presentation{
+		Name:      "stale",
+		CreatedAt: time.Now().UTC(),
+		Size:      99,
+	})
+	store.loadFromDisk()
+	delete(store.items, "stale")
+
+	if err := store.Remove("stale"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "stale")); !os.IsNotExist(err) {
+		t.Fatalf("stale presentation should be removed, stat err=%v", err)
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {
 		n    int64
@@ -398,4 +519,24 @@ func mustZip(files map[string]string) []byte {
 		panic(err)
 	}
 	return data
+}
+
+func createStoredPresentation(t *testing.T, baseDir, name string, meta Presentation) {
+	t.Helper()
+	presDir := filepath.Join(baseDir, name)
+	if err := os.MkdirAll(presDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(presDir, "index.html"), []byte("<html>ok</html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta.Name = name
+	meta.Path = ""
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(presDir, presentationMetadataFilename), data, 0644); err != nil {
+		t.Fatal(err)
+	}
 }

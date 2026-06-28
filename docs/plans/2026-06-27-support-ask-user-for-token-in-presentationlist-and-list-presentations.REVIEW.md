@@ -1,0 +1,1 @@
+Success: implementation matches the plan; browser login, cookie auth, bearer API compatibility, and route protection are in place, and tests cover the key flows.

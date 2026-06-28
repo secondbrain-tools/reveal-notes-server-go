@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const presentationMetadataFilename = ".presentation.json"
+
 // requireAccessToken returns a middleware that checks the Authorization header.
 // If the token is empty, the check is skipped (no auth required).
 func requireAccessToken(token string, next http.HandlerFunc) http.HandlerFunc {
@@ -21,9 +23,7 @@ func requireAccessToken(token string, next http.HandlerFunc) http.HandlerFunc {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		expected := "Bearer " + token
-		if auth != expected {
+		if !hasBearerToken(r, token) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(`{"error":"unauthorized"}`))
@@ -60,13 +60,94 @@ type PresentationStore struct {
 
 // NewPresentationStore creates a new PresentationStore rooted at dir.
 func NewPresentationStore(dir string, ttl time.Duration) *PresentationStore {
-	os.MkdirAll(dir, 0755)
-	return &PresentationStore{
+	_ = os.MkdirAll(dir, 0755)
+	ps := &PresentationStore{
 		dir:   dir,
 		ttl:   ttl,
 		now:   time.Now,
 		items: make(map[string]*Presentation),
 	}
+	ps.loadFromDisk()
+	return ps
+}
+
+func (ps *PresentationStore) presentationDir(name string) string {
+	return filepath.Join(ps.dir, name)
+}
+
+func (ps *PresentationStore) metadataPath(name string) string {
+	return filepath.Join(ps.presentationDir(name), presentationMetadataFilename)
+}
+
+func (ps *PresentationStore) writeMetadata(pres *Presentation) error {
+	data, err := json.MarshalIndent(pres, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(ps.metadataPath(pres.Name), data, 0644)
+}
+
+func (ps *PresentationStore) loadFromDisk() {
+	entries, err := os.ReadDir(ps.dir)
+	if err != nil {
+		return
+	}
+
+	items := make(map[string]*Presentation, len(entries))
+	cutoff := time.Time{}
+	if ps.ttl > 0 {
+		cutoff = ps.now().Add(-ps.ttl)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		path := ps.presentationDir(name)
+
+		if !entry.IsDir() {
+			_ = os.RemoveAll(path)
+			continue
+		}
+		if err := ValidatePresentationName(name); err != nil {
+			_ = os.RemoveAll(path)
+			continue
+		}
+
+		pres, err := ps.loadPresentation(name)
+		if err != nil {
+			_ = os.RemoveAll(path)
+			continue
+		}
+		if ps.ttl > 0 && pres.CreatedAt.Before(cutoff) {
+			_ = os.RemoveAll(path)
+			continue
+		}
+
+		items[name] = pres
+	}
+
+	ps.items = items
+}
+
+func (ps *PresentationStore) loadPresentation(name string) (*Presentation, error) {
+	data, err := os.ReadFile(ps.metadataPath(name))
+	if err != nil {
+		return nil, err
+	}
+
+	var pres Presentation
+	if err := json.Unmarshal(data, &pres); err != nil {
+		return nil, err
+	}
+	if pres.CreatedAt.IsZero() {
+		return nil, fmt.Errorf("missing createdAt")
+	}
+	if pres.Size < 0 {
+		return nil, fmt.Errorf("invalid size")
+	}
+
+	pres.Name = name
+	pres.Path = ps.presentationDir(name)
+	return &pres, nil
 }
 
 // Add extracts a zip archive from r into the presentation directory named name.
@@ -79,16 +160,24 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	dest := filepath.Join(ps.dir, name)
+	dest := ps.presentationDir(name)
 
 	// Remove existing if present
 	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove old presentation: %w", err)
 	}
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return nil, fmt.Errorf("create presentation dir: %w", err)
+	}
+
+	cleanup := func() {
+		_ = os.RemoveAll(dest)
+	}
 
 	// Create temp file for the zip (archive/zip needs seekable reader)
 	tmpFile, err := os.CreateTemp("", "pres-upload-*.zip")
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
@@ -96,20 +185,22 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 
 	written, err := io.Copy(tmpFile, r)
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("write temp zip: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("close temp zip: %w", err)
 	}
 
 	zipReader, err := zip.OpenReader(tmpFile.Name())
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("open zip: %w", err)
 	}
 	defer zipReader.Close()
 
 	// Extract files with zip-slip protection
-	var totalSize int64
 	for _, f := range zipReader.File {
 		// Clean the path and check for traversal
 		cleanPath := filepath.Clean(f.Name)
@@ -123,33 +214,40 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 		}
 
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(target, 0755)
+			if err := os.MkdirAll(target, 0755); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("create dir %s: %w", target, err)
+			}
 			continue
 		}
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			cleanup()
 			return nil, fmt.Errorf("create dir %s: %w", filepath.Dir(target), err)
 		}
 
 		src, err := f.Open()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("open zip entry %s: %w", f.Name, err)
 		}
 
 		dst, err := os.Create(target)
 		if err != nil {
 			src.Close()
+			cleanup()
 			return nil, fmt.Errorf("create file %s: %w", target, err)
 		}
 
-		n, err := io.Copy(dst, src)
-		src.Close()
-		dst.Close()
-		if err != nil {
+		if _, err := io.Copy(dst, src); err != nil {
+			src.Close()
+			dst.Close()
+			cleanup()
 			return nil, fmt.Errorf("extract %s: %w", f.Name, err)
 		}
-		totalSize += n
+		src.Close()
+		dst.Close()
 	}
 
 	now := ps.now()
@@ -159,8 +257,12 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 		CreatedAt: now,
 		Size:      written, // compressed size
 	}
-	ps.items[name] = pres
+	if err := ps.writeMetadata(pres); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("write metadata: %w", err)
+	}
 
+	ps.items[name] = pres
 	return pres, nil
 }
 
@@ -173,15 +275,22 @@ func (ps *PresentationStore) Get(name string) *Presentation {
 
 // Remove deletes a presentation from disk and memory.
 func (ps *PresentationStore) Remove(name string) error {
+	if err := ValidatePresentationName(name); err != nil {
+		return err
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	pres, ok := ps.items[name]
-	if !ok {
+	path := ps.presentationDir(name)
+	if ok {
+		path = pres.Path
+	} else if _, err := os.Stat(path); os.IsNotExist(err) {
 		return fmt.Errorf("presentation %q not found", name)
 	}
 
-	if err := os.RemoveAll(pres.Path); err != nil && !os.IsNotExist(err) {
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove presentation files: %w", err)
 	}
 
@@ -213,17 +322,26 @@ func (ps *PresentationStore) List() []PresentationInfo {
 
 // Prune removes presentations older than the store's TTL.
 func (ps *PresentationStore) Prune() {
+	if ps.ttl <= 0 {
+		return
+	}
+
 	cutoff := ps.now().Add(-ps.ttl)
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	for name, pres := range ps.items {
+		if _, err := os.Stat(pres.Path); os.IsNotExist(err) {
+			delete(ps.items, name)
+			continue
+		}
 		if pres.CreatedAt.Before(cutoff) {
-			os.RemoveAll(pres.Path)
+			_ = os.RemoveAll(pres.Path)
 			delete(ps.items, name)
 		}
 	}
+
 }
 
 // HandleUploadPresentation returns a handler that accepts a zip upload for a named presentation.

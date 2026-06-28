@@ -163,7 +163,7 @@ func TestHandleDashboard(t *testing.T) {
 	// Add a session
 	ts.server.Store.Touch("test-socket-id", nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/notes/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
 	resp := ts.Do(req)
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.Code)
@@ -185,7 +185,7 @@ func TestHandleDashboard(t *testing.T) {
 func TestHandleDashboardEmpty(t *testing.T) {
 	ts := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/notes/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
 	resp := ts.Do(req)
 
 	body, _ := io.ReadAll(resp.Body)
@@ -277,6 +277,50 @@ func TestStaticFileServing(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != staticContent {
 		t.Errorf("expected '%s', got '%s'", staticContent, string(body))
+	}
+}
+
+func TestNewServerPrunesExpiredUploadedPresentation(t *testing.T) {
+	presentationsDir := t.TempDir()
+	createStoredPresentation(t, presentationsDir, "talk", Presentation{
+		Name:      "talk",
+		CreatedAt: time.Now().UTC(),
+		Size:      123,
+	})
+
+	cfg := ServerConfig{
+		Hostname:          "127.0.0.1",
+		Port:              0,
+		PresentationDir:   t.TempDir(),
+		PresentationIndex: "/index.html",
+		PresentationsDir:  presentationsDir,
+		PresentationTtlMs: int(time.Hour.Milliseconds()),
+		ActiveTtlMs:       7200000,
+	}
+
+	server := NewServer(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/p/talk/", nil)
+	resp := httptest.NewRecorder()
+	server.Mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 before cleanup, got %d", resp.Code)
+	}
+
+	createStoredPresentation(t, presentationsDir, "talk", Presentation{
+		Name:      "talk",
+		CreatedAt: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+		Size:      123,
+	})
+
+	server = NewServer(cfg)
+	req = httptest.NewRequest(http.MethodGet, "/p/talk/", nil)
+	resp = httptest.NewRecorder()
+	server.Mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after startup cleanup, got %d", resp.Code)
+	}
+	if _, err := os.Stat(filepath.Join(presentationsDir, "talk")); !os.IsNotExist(err) {
+		t.Fatalf("expired presentation directory should be removed, stat err=%v", err)
 	}
 }
 

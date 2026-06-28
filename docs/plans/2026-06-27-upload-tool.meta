@@ -1,0 +1,107 @@
+{
+  "externalFlow": {
+    "metaVersion": 2,
+    "version": 1,
+    "runId": "c3df20fc-531e-4b6a-a6bd-c43846a7f85e",
+    "cwd": "/home/st6ka8/Code/Publisher/remote-notes-server",
+    "workflowSelectionId": "orchestrator-default",
+    "workflowId": "orchestrator-default",
+    "planFilePath": "docs/plans/2026-06-27-upload-tool.md",
+    "planName": "upload tool",
+    "selectedModelGroupId": "openai",
+    "currentStepId": null,
+    "status": "aborted",
+    "startedAt": "2026-06-27T13:09:57.381Z",
+    "updatedAt": "2026-06-27T13:38:44.955Z",
+    "lastOutcome": "success",
+    "lastError": "aborted by user",
+    "lastFailure": {
+      "stepId": "human_review",
+      "sessionId": "019f0943-f312-72b1-b293-74e7b5eb4a18",
+      "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-27-55-922Z_019f0943-f312-72b1-b293-74e7b5eb4a18.jsonl",
+      "stopReason": "stop",
+      "timestamp": "2026-06-27T13:29:32.323Z"
+    },
+    "pauseRequested": false,
+    "externalStepOnly": false,
+    "sessionStrategy": "fresh",
+    "sessionRecords": [
+      {
+        "stepId": "executing",
+        "sessionId": "019f0933-8b6c-701f-ab50-092a76ff6f76",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-10-00-812Z_019f0933-8b6c-701f-ab50-092a76ff6f76.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:09:57.418Z",
+        "updatedAt": "2026-06-27T13:17:34.854Z",
+        "endedAt": "2026-06-27T13:17:34.854Z",
+        "outcome": "success"
+      },
+      {
+        "stepId": "auto_review",
+        "sessionId": "019f093a-7917-77ac-8361-df800bf9bd95",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-17-34-871Z_019f093a-7917-77ac-8361-df800bf9bd95.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:17:34.870Z",
+        "updatedAt": "2026-06-27T13:20:55.364Z",
+        "endedAt": "2026-06-27T13:20:55.364Z",
+        "outcome": "issues"
+      },
+      {
+        "stepId": "executing",
+        "sessionId": "019f093d-8862-7788-b715-a3092abbca2a",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-20-55-394Z_019f093d-8862-7788-b715-a3092abbca2a.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:20:55.393Z",
+        "updatedAt": "2026-06-27T13:21:19.206Z",
+        "endedAt": "2026-06-27T13:21:19.206Z",
+        "outcome": "success"
+      },
+      {
+        "stepId": "auto_review",
+        "sessionId": "019f093d-e57c-720e-a96c-bfed456fe504",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-21-19-228Z_019f093d-e57c-720e-a96c-bfed456fe504.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:21:19.228Z",
+        "updatedAt": "2026-06-27T13:24:33.864Z",
+        "endedAt": "2026-06-27T13:24:33.864Z",
+        "outcome": "issues"
+      },
+      {
+        "stepId": "executing",
+        "sessionId": "019f0940-dddf-75a7-83bd-d7a7bc4fe7a0",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-24-33-887Z_019f0940-dddf-75a7-83bd-d7a7bc4fe7a0.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:24:33.886Z",
+        "updatedAt": "2026-06-27T13:25:31.649Z",
+        "endedAt": "2026-06-27T13:25:31.649Z",
+        "outcome": "success"
+      },
+      {
+        "stepId": "auto_review",
+        "sessionId": "019f0941-bf9d-70f6-b1a4-513216949543",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-25-31-677Z_019f0941-bf9d-70f6-b1a4-513216949543.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:25:31.677Z",
+        "updatedAt": "2026-06-27T13:27:55.876Z",
+        "endedAt": "2026-06-27T13:27:55.876Z",
+        "outcome": "success"
+      },
+      {
+        "stepId": "human_review",
+        "sessionId": "019f0943-f312-72b1-b293-74e7b5eb4a18",
+        "sessionFile": "/home/st6ka8/.pi/agent/sessions/--home-st6ka8-Code-Publisher-remote-notes-server--/2026-06-27T13-27-55-922Z_019f0943-f312-72b1-b293-74e7b5eb4a18.jsonl",
+        "status": "done",
+        "startedAt": "2026-06-27T13:27:55.921Z",
+        "updatedAt": "2026-06-27T13:33:02.851Z",
+        "endedAt": "2026-06-27T13:33:02.851Z",
+        "outcome": "success"
+      }
+    ],
+    "checklistItems": [],
+    "loopIterationCount": 4,
+    "logFilePath": ".pi/pi-flow/logs/2026-06-27T13-33-02.872Z-upload-tool.log"
+  },
+  "orchestrator": {
+    "planName": "upload tool"
+  }
+}

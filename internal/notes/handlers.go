@@ -319,8 +319,11 @@ func HandleSpeakerView(store *SessionStore, presentationsDir string) http.Handle
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// Extract socketId from path: /notes/{socketId}
-		socketId := strings.TrimPrefix(r.URL.Path, "/notes/")
+		// Extract socketId from the router path or fallback to the URL.
+		socketId := r.PathValue("socketId")
+		if socketId == "" {
+			socketId = strings.TrimPrefix(r.URL.Path, "/notes/")
+		}
 		if socketId == "" || socketId == r.URL.Path {
 			http.NotFound(w, r)
 			return
