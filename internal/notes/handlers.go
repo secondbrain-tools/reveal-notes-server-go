@@ -313,7 +313,14 @@ func htmlEscape(s string) string {
 }
 
 // HandleSpeakerView serves the embedded speaker view HTML with the socketId injected.
-func HandleSpeakerView(store *SessionStore, presentationsDir string) http.HandlerFunc {
+//
+// Access-token flow: when the URL carries a one-time ?token=... AND it
+// matches the configured access token, we set the signed session cookie
+// on our origin and redirect to the clean URL. Subsequent navigations
+// and Socket.IO connections from the same browser send the cookie
+// automatically — the token never persists in the address bar, history,
+// or share links.
+func HandleSpeakerView(store *SessionStore, presentationsDir, accessToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

@@ -224,9 +224,386 @@ func zipToMap(t *testing.T, data []byte) map[string][]byte {
 }
 
 func keys(m map[string][]byte) []string {
-	out := make([]string, 0, len(m))
+	s := make([]string, 0, len(m))
 	for k := range m {
-		out = append(out, k)
+		s = append(s, k)
 	}
-	return out
+	return s
+}
+func TestParseFilelist(t *testing.T) {
+	t.Run("empty filelist", func(t *testing.T) {
+		f := mustWriteFilelist(t, "")
+		patterns, err := parseFilelist(f)
+		if err != nil {
+			t.Fatalf("parseFilelist: %v", err)
+		}
+		if len(patterns) != 0 {
+			t.Fatalf("expected 0 patterns, got %d: %v", len(patterns), patterns)
+		}
+	})
+
+	t.Run("comments and blanks ignored", func(t *testing.T) {
+		content := `# This is a comment
+
+*.js
+
+  # indented comment
+
+assets/
+`
+		f := mustWriteFilelist(t, content)
+		patterns, err := parseFilelist(f)
+		if err != nil {
+			t.Fatalf("parseFilelist: %v", err)
+		}
+		if len(patterns) != 2 {
+			t.Fatalf("expected 2 patterns, got %d: %v", len(patterns), patterns)
+		}
+		if patterns[0] != "*.js" {
+			t.Fatalf("pattern[0] = %q, want %q", patterns[0], "*.js")
+		}
+		if patterns[1] != "assets/" {
+			t.Fatalf("pattern[1] = %q, want %q", patterns[1], "assets/")
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		_, err := parseFilelist("/nonexistent/filelist.txt")
+		if err == nil {
+			t.Fatal("expected error for missing file")
+		}
+	})
+
+	t.Run("whitespace trimming", func(t *testing.T) {
+		content := `  *.js  
+	assets/  
+`
+		f := mustWriteFilelist(t, content)
+		patterns, err := parseFilelist(f)
+		if err != nil {
+			t.Fatalf("parseFilelist: %v", err)
+		}
+		if len(patterns) != 2 {
+			t.Fatalf("expected 2 patterns, got %d: %v", len(patterns), patterns)
+		}
+		if patterns[0] != "*.js" {
+			t.Fatalf("pattern[0] = %q, want %q", patterns[0], "*.js")
+		}
+		if patterns[1] != "assets/" {
+			t.Fatalf("pattern[1] = %q, want %q", patterns[1], "assets/")
+		}
+	})
+}
+
+func TestBuildArchiveFilelist(t *testing.T) {
+	t.Run("filelist with specific files", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "app.js"), []byte("console.log('js')"))
+		mustWriteFile(t, filepath.Join(source, "style.css"), []byte("body {}"))
+		mustWriteFile(t, filepath.Join(source, "ignored.txt"), []byte("should not appear"))
+
+		filelist := mustWriteFilelist(t, "*.js\n*.css\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["app.js"]; !ok {
+			t.Fatal("expected app.js in archive")
+		}
+		if _, ok := entries["style.css"]; !ok {
+			t.Fatal("expected style.css in archive")
+		}
+		if _, ok := entries["ignored.txt"]; ok {
+			t.Fatal("ignored.txt should NOT be in archive")
+		}
+	})
+
+	t.Run("filelist with directory", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "assets", "app.js"), []byte("js"))
+		mustWriteFile(t, filepath.Join(source, "assets", "sub", "deep.js"), []byte("deep"))
+		mustWriteFile(t, filepath.Join(source, "dist", "bundle.js"), []byte("bundle"))
+
+		filelist := mustWriteFilelist(t, "assets/\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["assets/app.js"]; !ok {
+			t.Fatal("expected assets/app.js in archive")
+		}
+		if _, ok := entries["assets/sub/deep.js"]; !ok {
+			t.Fatal("expected assets/sub/deep.js in archive")
+		}
+		if _, ok := entries["dist/bundle.js"]; ok {
+			t.Fatal("dist/bundle.js should NOT be in archive")
+		}
+	})
+
+	t.Run("filelist with glob pattern", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "assets", "app.js"), []byte("js"))
+		mustWriteFile(t, filepath.Join(source, "nested", "deep.js"), []byte("deep"))
+		mustWriteFile(t, filepath.Join(source, "style.css"), []byte("css"))
+
+		filelist := mustWriteFilelist(t, "**/*.js\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["assets/app.js"]; !ok {
+			t.Fatal("expected assets/app.js in archive")
+		}
+		if _, ok := entries["nested/deep.js"]; !ok {
+			t.Fatal("expected nested/deep.js in archive")
+		}
+		if _, ok := entries["style.css"]; ok {
+			t.Fatal("style.css should NOT be in archive")
+		}
+	})
+
+	t.Run("filelist with negation", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "assets", "keep.js"), []byte("keep"))
+		mustWriteFile(t, filepath.Join(source, "assets", "skip.js"), []byte("skip"))
+		mustWriteFile(t, filepath.Join(source, "dist", "file.js"), []byte("included"))
+
+		filelist := mustWriteFilelist(t, "**/*.js\n!assets/skip.js\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["assets/keep.js"]; !ok {
+			t.Fatal("expected assets/keep.js in archive")
+		}
+		if _, ok := entries["dist/file.js"]; !ok {
+			t.Fatal("expected dist/file.js in archive")
+		}
+		if _, ok := entries["assets/skip.js"]; ok {
+			t.Fatal("assets/skip.js should NOT be in archive")
+		}
+	})
+
+	t.Run("html force-include even when not in filelist", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "app.js"), []byte("js"))
+		mustWriteFile(t, filepath.Join(source, "extra.txt"), []byte("extra"))
+
+		// Only include *.js files
+		filelist := mustWriteFilelist(t, "*.js\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		// HTML file should be included even though it's not *.js
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html (force-included) in archive")
+		}
+		if got := string(entries["index.html"]); got != "<html></html>" {
+			t.Fatalf("index.html content = %q", got)
+		}
+		if _, ok := entries["app.js"]; !ok {
+			t.Fatal("expected app.js in archive")
+		}
+		if _, ok := entries["extra.txt"]; ok {
+			t.Fatal("extra.txt should NOT be in archive")
+		}
+	})
+
+	t.Run("filelist with ignore post-filter", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "assets", "app.js"), []byte("js"))
+		mustWriteFile(t, filepath.Join(source, "assets", "app.map"), []byte("map"))
+
+		// Filelist includes everything under assets/
+		// --ignore excludes *.map files
+		filelist := mustWriteFilelist(t, "assets/\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:      source,
+			HTMLFile:       "presentation.html",
+			FilelistPath:   filelist,
+			IgnorePatterns: []string{"*.map"},
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["assets/app.js"]; !ok {
+			t.Fatal("expected assets/app.js in archive")
+		}
+		if _, ok := entries["assets/app.map"]; ok {
+			t.Fatal("assets/app.map should be excluded by --ignore")
+		}
+	})
+
+	t.Run("empty filelist includes only html", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "app.js"), []byte("js"))
+
+		// Empty filelist — no patterns, so nothing matches
+		filelist := mustWriteFilelist(t, "")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected only index.html, got %d entries: %v", len(entries), keys(entries))
+		}
+	})
+
+	t.Run("missing filelist returns error", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+
+		_, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filepath.Join(source, "nonexistent.txt"),
+		})
+		if err == nil {
+			t.Fatal("expected error for missing filelist")
+		}
+		if !strings.Contains(err.Error(), "read filelist") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("filelist patterns interact with subdirectories", func(t *testing.T) {
+		source := t.TempDir()
+		mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+		mustWriteFile(t, filepath.Join(source, "assets", "js", "main.js"), []byte("main"))
+		mustWriteFile(t, filepath.Join(source, "assets", "css", "style.css"), []byte("style"))
+		mustWriteFile(t, filepath.Join(source, "vendor", "lib.js"), []byte("lib"))
+
+		// Include all JS files anywhere via **/ pattern
+		filelist := mustWriteFilelist(t, "**/*.js\n")
+
+		archive, err := BuildArchive(ArchiveOptions{
+			SourceDir:    source,
+			HTMLFile:     "presentation.html",
+			FilelistPath: filelist,
+		})
+		if err != nil {
+			t.Fatalf("BuildArchive: %v", err)
+		}
+
+		entries := zipToMap(t, archive)
+		if _, ok := entries["index.html"]; !ok {
+			t.Fatal("expected index.html in archive")
+		}
+		if _, ok := entries["assets/js/main.js"]; !ok {
+			t.Fatal("expected assets/js/main.js in archive")
+		}
+		if _, ok := entries["vendor/lib.js"]; !ok {
+			t.Fatal("expected vendor/lib.js in archive")
+		}
+		if _, ok := entries["assets/css/style.css"]; ok {
+			t.Fatal("style.css should NOT be in archive")
+		}
+	})
+}
+
+func TestBuildArchiveFilelistSymlinkRejected(t *testing.T) {
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+	mustWriteFile(t, filepath.Join(source, "real.txt"), []byte("real"))
+	if err := os.Symlink("real.txt", filepath.Join(source, "link.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	filelist := mustWriteFilelist(t, "**/*.txt\n")
+
+	_, err := BuildArchive(ArchiveOptions{
+		SourceDir:    source,
+		HTMLFile:     "presentation.html",
+		FilelistPath: filelist,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlinks are not supported") {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+}
+
+// mustWriteFilelist writes content to a temp file and returns its path.
+func mustWriteFilelist(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "filelist-*.txt")
+	if err != nil {
+		t.Fatalf("create temp filelist: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write filelist: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close filelist: %v", err)
+	}
+	return f.Name()
 }

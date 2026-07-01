@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"log"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -12,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zishang520/engine.io/utils"
 )
 
 const (
@@ -35,11 +40,86 @@ func hasBearerToken(r *http.Request, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) == 1
 }
 
+// validateHandshakeToken reports whether `provided` matches the configured
+// `expected` access token. An empty expected token (i.e. notes server
+// running without --access-token) authorizes every provided value.
+func validateHandshakeToken(expected, provided string) bool {
+	if expected == "" {
+		return true
+	}
+	if provided == "" || len(provided) != len(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// hasQueryToken reports whether the request carries the access token as
+// ?token=... in its query string. This is how the notes-client JS plugin
+// forwards the token via Socket.IO's query channel on cross-origin
+// polling / WebSocket upgrades.
+func hasQueryToken(r *http.Request, token string) bool {
+	return validateHandshakeToken(token, r.URL.Query().Get("token"))
+}
+
+// authorizeHandshake validates a Socket.IO handshake against the configured
+// access token. It checks the auth payload first, then the query string,
+// returning a non-nil error if both fail.
+//
+// An empty `expected` token authorizes every handshake (open mode).
+// authorizeHandshake validates a Socket.IO handshake against the configured
+// access token. It checks the auth payload first, then the query string,
+// returning a non-nil error if both fail.
+//
+// An empty `expected` token authorizes every handshake (open mode).
+func authorizeHandshake(expected string, authPayload map[string]any, query *utils.ParameterBag) error {
+	log.Printf("[auth] handshake: expected=%q auth=%+v query=%+v", expected, authPayload, queryString(query))
+	if expected == "" {
+		return nil
+	}
+	if authPayload != nil {
+		if auth, ok := authPayload["auth"].(map[string]any); ok {
+			if token, _ := auth["token"].(string); validateHandshakeToken(expected, token) {
+				log.Printf("[auth] handshake: accepted via auth payload")
+				return nil
+			}
+		}
+		if token, _ := authPayload["token"].(string); validateHandshakeToken(expected, token) {
+			log.Printf("[auth] handshake: accepted via auth.token")
+			return nil
+		}
+	}
+	if query != nil {
+		if v, _ := query.Get("token"); validateHandshakeToken(expected, v) {
+			log.Printf("[auth] handshake: accepted via query.token")
+			return nil
+		}
+	}
+	log.Printf("[auth] handshake: REJECTED (no matching token)")
+	return errors.New("unauthorized")
+}
+
+// queryString returns a flat string of the query for logging without
+// dumping a struct full of internal fields.
+func queryString(q *utils.ParameterBag) string {
+	if q == nil {
+		return "<nil>"
+	}
+	keys := q.Keys()
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("%s=%q", k, q.Peek(k)))
+	}
+	return "{" + strings.Join(out, ",") + "}"
+}
+
 func (a *browserAuth) authenticated(r *http.Request) bool {
 	if !a.enabled() {
 		return true
 	}
 	if hasBearerToken(r, a.token) {
+		return true
+	}
+	if hasQueryToken(r, a.token) {
 		return true
 	}
 	cookie, err := r.Cookie(browserAuthCookieName)
@@ -55,6 +135,20 @@ func (a *browserAuth) wrapPage(next http.Handler) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.authenticated(r) {
+			// If auth succeeded via a one-time ?token=... query param,
+			// promote it to a signed session cookie. We do NOT redirect
+			// to a clean URL — the browser would drop ?token= from the
+			// URL on redirect, and the speaker view's own JS needs to
+			// capture it from the URL in order to forward it on the
+			// Socket.IO connection. The JS strips the token via
+			// history.replaceState after the Socket.IO connect is in
+			// flight.
+			if t := r.URL.Query().Get("token"); t != "" && hasQueryToken(r, a.token) {
+				a.setSessionCookie(w, r)
+				log.Printf("[auth] wrapPage: served with cookie, ?token= still in URL (JS will strip)")
+				next.ServeHTTP(w, r)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -67,10 +161,42 @@ func (a *browserAuth) wrapSocket(next http.Handler) http.HandlerFunc {
 		return next.ServeHTTP
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		authSummary := "?"
+		if c, err := r.Cookie(browserAuthCookieName); err == nil {
+			authSummary = "cookie(set, len=" + strconv.Itoa(len(c.Value)) + ")"
+		}
+		if t := r.Header.Get("Authorization"); t != "" {
+			authSummary += " bearer"
+		}
+		if t := r.URL.Query().Get("token"); t != "" {
+			authSummary += " query-token"
+		}
+		log.Printf("[auth] wrapSocket: %s %s%s origin=%q auth=%s",
+			r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Origin"), authSummary)
+
+		// Always set CORS headers for cross-origin Socket.IO requests,
+		// even when we end up rejecting them. Without this the browser
+		// shows a misleading "No Access-Control-Allow-Origin header"
+		// error for a request that was actually rejected as 401.
+		if origin := r.Header.Get("Origin"); origin != "" && isLocalOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		}
+		// Handle CORS preflight — no auth required for OPTIONS.
+		if r.Method == http.MethodOptions {
+			log.Printf("[auth] wrapSocket: OPTIONS preflight → 204")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if a.authenticated(r) {
+			log.Printf("[auth] wrapSocket: authenticated, passing through")
 			next.ServeHTTP(w, r)
 			return
 		}
+		log.Printf("[auth] wrapSocket: NOT authenticated → 401")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
@@ -90,20 +216,29 @@ func (a *browserAuth) loginHandler() http.HandlerFunc {
 				return
 			}
 			renderLoginPage(w, returnTo, "", http.StatusOK)
-		case http.MethodPost:
+case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
 				renderLoginPage(w, "/", "invalid login form", http.StatusBadRequest)
 				return
 			}
 			returnTo := cleanReturnTo(r.FormValue("returnTo"))
-			if subtle.ConstantTimeCompare([]byte(r.FormValue("token")), []byte(a.token)) != 1 {
+			provided := r.FormValue("token")
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
 				renderLoginPage(w, returnTo, "invalid access token", http.StatusUnauthorized)
 				return
 			}
 			a.setSessionCookie(w, r)
-			http.Redirect(w, r, returnTo, http.StatusSeeOther)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			// Append ?token=... to the redirect so the speaker view's
+			// self-auth JS can capture it and forward it on the
+			// Socket.IO connection. Some browsers (notably Firefox)
+			// drop cookies on cross-origin WebSocket upgrade requests
+			// even when they keep them on XHR. The query param is the
+			// belt-and-braces path that works regardless of cookie
+			// quirks. The speaker view's JS strips it via
+			// history.replaceState as soon as the Socket.IO connect is
+			// queued.
+			tokenParam := url.Values{"token": {provided}}.Encode()
+			http.Redirect(w, r, returnTo+"?"+tokenParam, http.StatusSeeOther)
 		}
 	}
 }
@@ -245,4 +380,95 @@ func renderLoginPage(w http.ResponseWriter, returnTo, errMsg string, status int)
 
 func (a *browserAuth) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login?returnTo="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+}
+
+// tokenExchangeHandler accepts the access token from a cross-origin POST
+// and, if it matches, sets the browser session cookie. The publisher's
+// presentation page uses this to hand off the token once, so the
+// speaker-notes page can authenticate via the cookie instead of having the
+// token persist in the URL.
+//
+// Mounted outside auth.wrapPage so OPTIONS preflight bypasses the
+// /login redirect — the browser rejects any 3xx on a preflight.
+func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[auth] /auth-token: %s origin=%q", r.Method, r.Header.Get("Origin"))
+		// Always answer CORS preflight cleanly, regardless of auth state.
+		// This must happen BEFORE any auth check or writeHeader call so
+		// the browser's preflight sees our 204 (not a redirect).
+		if origin := r.Header.Get("Origin"); origin != "" && isLocalOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		}
+		if r.Method == http.MethodOptions || r.Method == http.MethodHead {
+			log.Printf("[auth] /auth-token: preflight → 204")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodPost {
+			log.Printf("[auth] /auth-token: not POST → 405")
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		log.Printf("[auth] /auth-token: open-mode=%v", !a.enabled())
+
+		// Open mode (no --accessToken configured) — set a no-op session
+		// cookie so the speaker-notes page stops redirecting through /login.
+		if !a.enabled() {
+			a.setSessionCookie(w, r)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true,"open":true}`))
+			return
+		}
+
+		// Accept the token from either a JSON body or a form field.
+		var provided string
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			var payload struct {
+				Token string `json:"token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+				provided = payload.Token
+			}
+		} else if err := r.ParseForm(); err == nil {
+			provided = r.FormValue("token")
+		}
+
+		if provided == "" {
+			http.Error(w, `{"error":"missing token"}`, http.StatusBadRequest)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
+			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// Promote the supplied token into a signed session cookie so
+		// subsequent same-origin navigations authenticate via the cookie.
+		a.setSessionCookie(w, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}
+}
+
+// isLocalOrigin echoes the request's Origin header only for localhost /
+// 127.0.0.1 schemes — anything else is left alone so we don't
+// accidentally widen CORS to public origins.
+func isLocalOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	scheme := u.Scheme
+	return (scheme == "http" || scheme == "https") &&
+		(host == "localhost" || host == "127.0.0.1")
 }

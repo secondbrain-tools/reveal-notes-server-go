@@ -15,6 +15,7 @@ type ArchiveOptions struct {
 	SourceDir      string
 	HTMLFile       string
 	IgnorePatterns []string
+	FilelistPath   string
 }
 
 func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
@@ -67,6 +68,19 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 		return nil, fmt.Errorf("selected html file %q is ignored by --ignore", opts.HTMLFile)
 	}
 
+	// Parse filelist if provided
+	var includeMatcher *IgnoreMatcher
+	if opts.FilelistPath != "" {
+		patterns, err := parseFilelist(opts.FilelistPath)
+		if err != nil {
+			return nil, err
+		}
+		includeMatcher, err = NewIgnoreMatcher(patterns)
+		if err != nil {
+			return nil, fmt.Errorf("filelist %q: %w", opts.FilelistPath, err)
+		}
+	}
+
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	tracker := newZipEntryTracker()
@@ -92,6 +106,18 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 			return err
 		}
 		relSlash := filepath.ToSlash(rel)
+		// Filelist include check: only include paths matching filelist patterns
+		if includeMatcher != nil && current != htmlAbs {
+			included, err := includeMatcher.Ignored(relSlash, d.IsDir())
+			if err != nil {
+				return err
+			}
+			if !included {
+				return nil
+			}
+		}
+
+		// Apply --ignore patterns as post-filter
 		ignored, err := matcher.Ignored(relSlash, d.IsDir())
 		if err != nil {
 			return err
@@ -142,6 +168,24 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// parseFilelist reads a filelist file and returns the list of non-empty,
+// non-comment patterns. Lines starting with "#" are treated as comments.
+func parseFilelist(filelistPath string) ([]string, error) {
+	data, err := os.ReadFile(filelistPath)
+	if err != nil {
+		return nil, fmt.Errorf("read filelist %q: %w", filelistPath, err)
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns, nil
 }
 
 func resolveHTMLFilePath(sourceAbs, htmlFile string) (string, error) {

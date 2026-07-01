@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zishang520/engine.io/utils"
 )
 
 func newAuthTestServer(t *testing.T) (*httptest.Server, string) {
@@ -199,5 +201,169 @@ func TestBrowserAuthSetsSecureCookieOnHTTPS(t *testing.T) {
 	cookie := cookies[0]
 	if cookie.Name != browserAuthCookieName || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("unexpected cookie: %#v", cookie)
+	}
+}
+
+// newAuthTestServerWithToken creates a test server with a configured access
+// token. The presentation index file is added so the mux handles the root
+// route. It reuses the shared testServer type from server_test.go.
+func newAuthTestServerWithToken(t *testing.T, token string) *testServer {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ServerConfig{
+		Hostname:          "127.0.0.1",
+		Port:              0,
+		PresentationDir:   tmpDir,
+		PresentationIndex: "/index.html",
+		ActiveTtlMs:       7200000,
+		AccessToken:       token,
+	}
+	s := NewServer(cfg)
+	return &testServer{server: s, mux: s.Mux}
+}
+
+func TestHasQueryToken(t *testing.T) {
+	cases := []struct {
+		name     string
+		url      string
+		expected string
+		want     bool
+	}{
+		{"empty expected never matches", "http://x/?token=abc", "", false},
+		{"matching token", "http://x/?token=secret", "secret", true},
+		{"wrong token", "http://x/?token=other", "secret", false},
+		{"missing query", "http://x/", "secret", false},
+		{"empty query value", "http://x/?token=", "secret", false},
+		{"token in unrelated param ignored", "http://x/?t=secret", "secret", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			if got := hasQueryToken(r, tc.expected); got != tc.want {
+				t.Fatalf("hasQueryToken(%q, %q) = %v, want %v", tc.url, tc.expected, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractHandshakeToken(t *testing.T) {
+	q := utils.NewParameterBag(map[string][]string{"token": {"from-query"}})
+	authOnly := map[string]any{"auth": map[string]any{"token": "from-auth"}}
+	flat := map[string]any{"token": "from-auth"}
+	empty := utils.NewParameterBag(nil)
+
+	cases := []struct {
+		name  string
+		auth  any
+		query *utils.ParameterBag
+		want  string
+	}{
+		{"standard auth payload takes precedence", authOnly, q, "from-auth"},
+		{"flat token layout also works", flat, q, "from-auth"},
+		{"falls back to query when auth absent", nil, q, "from-query"},
+		{"falls back to query when auth token is empty", map[string]any{"auth": map[string]any{"token": ""}}, q, "from-query"},
+		{"falls back to query when auth token is wrong type", map[string]any{"auth": map[string]any{"token": 42}}, q, "from-query"},
+		{"returns empty when neither present", nil, empty, ""},
+		{"returns empty for nil auth and nil query", nil, nil, ""},
+		{"returns empty when auth token is empty and query has no token", map[string]any{"auth": map[string]any{"token": ""}}, empty, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractHandshakeToken(tc.auth, tc.query); got != tc.want {
+				t.Fatalf("extractHandshakeToken() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateHandshakeToken(t *testing.T) {
+	if !validateHandshakeToken("", "anything") {
+		t.Fatal("empty expected must authorize every provided token")
+	}
+	if validateHandshakeToken("secret", "") {
+		t.Fatal("non-empty expected must reject empty provided")
+	}
+	if !validateHandshakeToken("secret", "secret") {
+		t.Fatal("matching tokens must validate")
+	}
+	if validateHandshakeToken("secret", "Secret") {
+		t.Fatal("tokens must match exactly (no case folding)")
+	}
+	if validateHandshakeToken("secret", "secre") {
+		t.Fatal("prefix must not validate")
+	}
+}
+
+func TestAuthorizeHandshake(t *testing.T) {
+	q := utils.NewParameterBag(map[string][]string{"token": {"secret"}})
+	auth := map[string]any{"auth": map[string]any{"token": "secret"}}
+	wrong := map[string]any{"auth": map[string]any{"token": "nope"}}
+
+	// No token configured: every handshake is authorized.
+	if err := authorizeHandshake("", auth, q); err != nil {
+		t.Fatalf("expected no error when no token is configured, got %v", err)
+	}
+	if err := authorizeHandshake("", nil, nil); err != nil {
+		t.Fatalf("expected no error for nil handshake with no token configured, got %v", err)
+	}
+
+	// Token configured, handshake matches via auth payload.
+	if err := authorizeHandshake("secret", auth, q); err != nil {
+		t.Fatalf("expected no error for matching auth payload, got %v", err)
+	}
+
+	// Token configured, handshake matches via query string.
+	if err := authorizeHandshake("secret", nil, q); err != nil {
+		t.Fatalf("expected no error for matching query string, got %v", err)
+	}
+
+	// Token configured, handshake is wrong.
+	if err := authorizeHandshake("secret", wrong, q); err == nil {
+		t.Fatal("expected error for mismatched token")
+	} else if err.Error() != "unauthorized" {
+		t.Fatalf("expected 'unauthorized' error, got %q", err.Error())
+	}
+
+	// Token configured, handshake is missing.
+	if err := authorizeHandshake("secret", nil, nil); err == nil {
+		t.Fatal("expected error for missing token")
+	}
+}
+
+func TestWrapSocketAcceptsQueryStringToken(t *testing.T) {
+	ts := newAuthTestServerWithToken(t, "secret")
+
+	// Missing token and no cookie: blocked at the edge.
+	req := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling", nil)
+	if resp := ts.Do(req); resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", resp.Code)
+	}
+
+	// Wrong query token: blocked at the edge.
+	req = httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&token=wrong", nil)
+	if resp := ts.Do(req); resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong query token, got %d", resp.Code)
+	}
+
+	// Correct query token: the engine.io handler is reached. It still
+	// needs the EIO/transport params set; with polling transport it
+	// responds 200 with the open payload.
+	req = httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&token=secret&t=test", nil)
+	if resp := ts.Do(req); resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 with correct query token, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+}
+
+func TestWrapSocketQueryTokenDisabledWhenNoAccessToken(t *testing.T) {
+	// When no access token is configured, the auth middleware is a no-op
+	// and any request — including ones with a stray ?token=... — must pass.
+	ts := newAuthTestServerWithToken(t, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&t=test", nil)
+	if resp := ts.Do(req); resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 when auth is disabled, got %d", resp.Code)
 	}
 }

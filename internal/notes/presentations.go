@@ -2,6 +2,7 @@ package notes
 
 import (
 	"archive/zip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,7 @@ type Presentation struct {
 	Path      string    `json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
 	Size      int64     `json:"size"`
+	Hash      string    `json:"hash,omitempty"` // sha256:<hex> of the uploaded zip
 }
 
 // PresentationInfo is the JSON-friendly representation for the list endpoint.
@@ -144,6 +146,7 @@ func (ps *PresentationStore) loadPresentation(name string) (*Presentation, error
 	if pres.Size < 0 {
 		return nil, fmt.Errorf("invalid size")
 	}
+	// Hash is optional — older uploads may not have it.
 
 	pres.Name = name
 	pres.Path = ps.presentationDir(name)
@@ -175,6 +178,7 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 	}
 
 	// Create temp file for the zip (archive/zip needs seekable reader)
+	// We also hash the zip bytes while writing to the temp file.
 	tmpFile, err := os.CreateTemp("", "pres-upload-*.zip")
 	if err != nil {
 		cleanup()
@@ -183,7 +187,8 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	written, err := io.Copy(tmpFile, r)
+	hash := sha256.New()
+	written, err := io.Copy(tmpFile, io.TeeReader(r, hash))
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("write temp zip: %w", err)
@@ -250,12 +255,15 @@ func (ps *PresentationStore) Add(name string, r io.Reader) (*Presentation, error
 		dst.Close()
 	}
 
+	archiveHash := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+
 	now := ps.now()
 	pres := &Presentation{
 		Name:      name,
 		Path:      dest,
 		CreatedAt: now,
 		Size:      written, // compressed size
+		Hash:      archiveHash,
 	}
 	if err := ps.writeMetadata(pres); err != nil {
 		cleanup()
@@ -271,6 +279,17 @@ func (ps *PresentationStore) Get(name string) *Presentation {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.items[name]
+}
+
+// GetHash returns the stored archive hash for a presentation, or empty string if the
+// presentation does not exist or has no hash (older uploads).
+func (ps *PresentationStore) GetHash(name string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if pres, ok := ps.items[name]; ok {
+		return pres.Hash
+	}
+	return ""
 }
 
 // Remove deletes a presentation from disk and memory.
@@ -444,6 +463,42 @@ func HandleDeletePresentation(store *PresentationStore) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "name": name})
+	}
+}
+
+// HandleGetPresentationHash returns a handler that returns the stored archive hash
+// for a presentation. Returns 404 if the presentation does not exist or has no hash.
+func HandleGetPresentationHash(store *PresentationStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		name := r.PathValue("name")
+		if name == "" {
+			http.Error(w, "Missing presentation name", http.StatusBadRequest)
+			return
+		}
+
+		hash := store.GetHash(name)
+		if hash == "" {
+			// Either the presentation doesn't exist or has no hash
+			if store.Get(name) == nil {
+				http.Error(w, "Presentation not found", http.StatusNotFound)
+				return
+			}
+			// Presentation exists but has no hash (pre-feature upload)
+			http.Error(w, "No hash available for this presentation", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"name": name,
+			"hash": hash,
+		})
 	}
 }
 

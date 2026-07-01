@@ -79,6 +79,27 @@ func NewServer(cfg ServerConfig) *Server {
 		AccessToken:     cfg.AccessToken,
 		IdleShutdown:    idleShutdown,
 	}
+// Defense-in-depth: reject Socket.IO handshakes that don't carry a
+	// valid access token. wrapSocket() already enforces this at the
+	// HTTP polling layer, but Socket.IO's WebSocket upgrade bypasses
+	// mux routing entirely — without this middleware the upgrade would
+	// succeed with an empty auth payload.
+	if cfg.AccessToken != "" {
+		sio.Use(func(so *socket.Socket, next func(*socket.ExtendedError)) {
+			hs := so.Handshake()
+			var authPayload map[string]any
+			if hs != nil {
+				authPayload = map[string]any{
+					"auth": hs.Auth,
+				}
+			}
+			if err := authorizeHandshake(cfg.AccessToken, authPayload, hs.Query); err != nil {
+				next(socket.NewExtendedError("unauthorized", nil))
+				return
+			}
+			next(nil)
+		})
+	}
 
 	sio.On("connection", func(clients ...any) {
 		so := clients[0].(*socket.Socket)
@@ -136,11 +157,19 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("GET /api/presentations", requireAccessToken(cfg.AccessToken, HandleListPresentations(presStore)))
 	mux.HandleFunc("DELETE /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleDeletePresentation(presStore)))
 
-	// Browser auth entry points.
+// Browser auth entry points.
 	mux.HandleFunc("GET /login", auth.loginHandler())
 	mux.HandleFunc("POST /login", auth.loginHandler())
 	mux.HandleFunc("GET /logout", auth.logoutHandler())
 	mux.HandleFunc("POST /logout", auth.logoutHandler())
+
+	// Cross-origin cookie handoff: the publisher's presentation page POSTs
+	// the token here once and we promote it to a signed session cookie on
+	// our own origin. Subsequent navigations / Socket.IO connections from
+	// the same browser send the cookie automatically. Mounted outside
+	// auth.wrapPage so OPTIONS preflight bypasses the /login redirect —
+	// the browser rejects any 3xx on a preflight.
+	mux.HandleFunc("/auth-token", auth.tokenExchangeHandler())
 
 	// Serve uploaded presentations at /p/{name}/...
 	mux.HandleFunc("/p/{name}/", auth.wrapPage(HandleServePresentation(cfg.PresentationsDir)))
@@ -166,7 +195,7 @@ func NewServer(cfg ServerConfig) *Server {
 	dashboardHandler := auth.wrapPage(HandleDashboard(store, activeTtl))
 	mux.HandleFunc("GET /notes", dashboardHandler)
 	mux.HandleFunc("GET /notes/", dashboardHandler)
-	mux.HandleFunc("GET /notes/{socketId}", auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir)))
+	mux.HandleFunc("GET /notes/{socketId}", auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir, cfg.AccessToken)))
 
 	// Static file serving and root handler
 	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))

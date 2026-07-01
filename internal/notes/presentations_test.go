@@ -394,6 +394,151 @@ func TestPresentationPruning(t *testing.T) {
 	}
 }
 
+func TestPresentationStoreReloadsPersistedMetadataWithHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	baseTime := time.Now().UTC()
+
+	store := NewPresentationStore(tmpDir, 24*time.Hour)
+	store.now = func() time.Time { return baseTime }
+
+	zipData, _ := createZip(map[string]string{"index.html": "<html>ReloadWithHash</html>"})
+	pres, err := store.Add("reload-hash", bytes.NewReader(zipData))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pres.Hash == "" {
+		t.Fatal("expected hash to be stored")
+	}
+	if !strings.HasPrefix(pres.Hash, "sha256:") {
+		t.Fatalf("expected hash to start with sha256:, got %q", pres.Hash)
+	}
+
+	// Verify hash persisted to disk
+	metadataBytes, err := os.ReadFile(filepath.Join(tmpDir, "reload-hash", presentationMetadataFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata Presentation
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Hash != pres.Hash {
+		t.Fatalf("hash mismatch: disk=%q vs mem=%q", metadata.Hash, pres.Hash)
+	}
+
+	// Create a second store to reload from disk
+	reloaded := NewPresentationStore(tmpDir, 24*time.Hour)
+	reloadedHash := reloaded.GetHash("reload-hash")
+	if reloadedHash != pres.Hash {
+		t.Fatalf("reloaded hash mismatch: %q vs %q", reloadedHash, pres.Hash)
+	}
+
+	// Verify full metadata is consistent after reload
+	list := reloaded.List()
+	if len(list) != 1 || list[0].Name != "reload-hash" {
+		t.Fatalf("unexpected list after reload: %+v", list)
+	}
+}
+
+func TestHandleGetPresentationHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
+
+	zipData, _ := createZip(map[string]string{"index.html": "<html>HashTest</html>"})
+	presStore.Add("hash-test", bytes.NewReader(zipData))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/presentations/{name}/hash", HandleGetPresentationHash(presStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations/hash-test/hash", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.Code, string(bodyBytes))
+	}
+
+	var result struct {
+		Name string `json:"name"`
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "hash-test" {
+		t.Errorf("expected name hash-test, got %q", result.Name)
+	}
+	if !strings.HasPrefix(result.Hash, "sha256:") {
+		t.Errorf("expected sha256 prefix, got %q", result.Hash)
+	}
+}
+
+func TestHandleGetPresentationHashNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/presentations/{name}/hash", HandleGetPresentationHash(presStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations/nonexistent/hash", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNotFound {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 404 for missing presentation, got %d: %s", resp.Code, string(bodyBytes))
+	}
+}
+
+func TestHandleGetPresentationHashRequiresAuth(t *testing.T) {
+	tmpDir := t.TempDir()
+	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
+
+	zipData, _ := createZip(map[string]string{"index.html": "<html>AuthHash</html>"})
+	presStore.Add("auth-hash", bytes.NewReader(zipData))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken("secret-token", HandleGetPresentationHash(presStore)))
+
+	// Without auth
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations/auth-hash/hash", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", resp.Code)
+	}
+
+	// With correct auth
+	req = httptest.NewRequest(http.MethodGet, "/api/presentations/auth-hash/hash", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 with auth, got %d", resp.Code)
+	}
+}
+
+func TestPresentationStoreGetHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	presStore := NewPresentationStore(tmpDir, 24*time.Hour)
+
+	zipData, _ := createZip(map[string]string{"index.html": "<html>GetHash</html>"})
+	presStore.Add("get-hash", bytes.NewReader(zipData))
+
+	// Existing presentation with hash
+	hash := presStore.GetHash("get-hash")
+	if hash == "" || !strings.HasPrefix(hash, "sha256:") {
+		t.Fatalf("expected sha256 hash, got %q", hash)
+	}
+
+	// Non-existent presentation
+	if h := presStore.GetHash("does-not-exist"); h != "" {
+		t.Fatalf("expected empty hash for non-existent, got %q", h)
+	}
+}
+
 func TestPresentationStoreReloadsPersistedMetadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	baseTime := time.Now().UTC()

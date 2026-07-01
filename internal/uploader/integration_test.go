@@ -2,7 +2,9 @@ package uploader
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -150,6 +152,207 @@ func TestUploadToNotesServerWithBearerAuth(t *testing.T) {
 	defer missingResp.Body.Close()
 	if missingResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected ignored file to be absent, got %s", missingResp.Status)
+	}
+}
+
+func TestUploadSkippedOnHashMatch(t *testing.T) {
+	uploadsDir := t.TempDir()
+	presentationDir := t.TempDir()
+
+	server := notes.NewServer(notes.ServerConfig{
+		Hostname:          "127.0.0.1",
+		Port:              0,
+		PresentationDir:   presentationDir,
+		PresentationIndex: "/index.html",
+		PresentationsDir:  uploadsDir,
+		AccessToken:       "secret-token",
+	})
+	ts := httptest.NewServer(server.Mux)
+	defer ts.Close()
+
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html><body><h1>Skipped</h1></body></html>"))
+	mustWriteFile(t, filepath.Join(source, "app.js"), []byte("window.answer = 42;"))
+
+	archive, err := BuildArchive(ArchiveOptions{
+		SourceDir: source,
+		HTMLFile:  "presentation.html",
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive: %v", err)
+	}
+
+	client := ts.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
+	// First upload: should succeed
+	resp, err := UploadPresentation(context.Background(), client, ts.URL, "skip-test", archive, "secret-token")
+	if err != nil {
+		t.Fatalf("first UploadPresentation: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first upload status = %s", resp.Status)
+	}
+
+	// Check that the remote hash matches the local hash
+	localHash := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
+	remoteHash, err := FetchRemoteHash(context.Background(), client, ts.URL, "skip-test", "secret-token")
+	if err != nil {
+		t.Fatalf("FetchRemoteHash: %v", err)
+	}
+	if remoteHash != localHash {
+		t.Fatalf("hash mismatch: remote=%q local=%q", remoteHash, localHash)
+	}
+
+	// Second upload of identical content: hash should match, so we skip
+	remoteHash2, err := FetchRemoteHash(context.Background(), client, ts.URL, "skip-test", "secret-token")
+	if err != nil {
+		t.Fatalf("second FetchRemoteHash: %v", err)
+	}
+	if remoteHash2 != localHash {
+		t.Fatalf("second hash check should match: remote=%q local=%q", remoteHash2, localHash)
+	}
+
+	// Verify the presentation is still listed
+	listReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/presentations", nil)
+	if err != nil {
+		t.Fatalf("new list request: %v", err)
+	}
+	listReq.Header.Set("Authorization", "Bearer secret-token")
+	listResp, err := client.Do(listReq)
+	if err != nil {
+		t.Fatalf("list request: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %s", listResp.Status)
+	}
+	var listResult struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if listResult.Count != 1 {
+		t.Fatalf("expected 1 presentation, got %d", listResult.Count)
+	}
+}
+
+func TestUploadProceedsOnHashDifference(t *testing.T) {
+	uploadsDir := t.TempDir()
+	presentationDir := t.TempDir()
+
+	server := notes.NewServer(notes.ServerConfig{
+		Hostname:          "127.0.0.1",
+		Port:              0,
+		PresentationDir:   presentationDir,
+		PresentationIndex: "/index.html",
+		PresentationsDir:  uploadsDir,
+		AccessToken:       "secret-token",
+	})
+	ts := httptest.NewServer(server.Mux)
+	defer ts.Close()
+
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html><body><h1>Version 1</h1></body></html>"))
+
+	archive1, err := BuildArchive(ArchiveOptions{
+		SourceDir: source,
+		HTMLFile:  "presentation.html",
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive v1: %v", err)
+	}
+
+	client := ts.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
+	// First upload
+	resp1, err := UploadPresentation(context.Background(), client, ts.URL, "diff-test", archive1, "secret-token")
+	if err != nil {
+		t.Fatalf("first UploadPresentation: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusCreated {
+		t.Fatalf("first upload status = %s", resp1.Status)
+	}
+
+	// Change the content
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html><body><h1>Version 2 Modified</h1></body></html>"))
+
+	archive2, err := BuildArchive(ArchiveOptions{
+		SourceDir: source,
+		HTMLFile:  "presentation.html",
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive v2: %v", err)
+	}
+
+	// Hashes should differ
+	localHash1 := fmt.Sprintf("sha256:%x", sha256.Sum256(archive1))
+	localHash2 := fmt.Sprintf("sha256:%x", sha256.Sum256(archive2))
+	if localHash1 == localHash2 {
+		t.Fatalf("hashes should differ after content change")
+	}
+
+	// Fetch remote hash (should be v1 hash)
+	remoteHash, err := FetchRemoteHash(context.Background(), client, ts.URL, "diff-test", "secret-token")
+	if err != nil {
+		t.Fatalf("FetchRemoteHash: %v", err)
+	}
+	if remoteHash != localHash1 {
+		t.Fatalf("remote hash should match v1: remote=%q local=%q", remoteHash, localHash1)
+	}
+	if remoteHash == localHash2 {
+		t.Fatalf("remote hash should NOT match v2")
+	}
+
+	// Second upload with different content: should succeed
+	resp2, err := UploadPresentation(context.Background(), client, ts.URL, "diff-test", archive2, "secret-token")
+	if err != nil {
+		t.Fatalf("second UploadPresentation: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("second upload status = %s", resp2.Status)
+	}
+
+	// Remote hash should now be v2
+	remoteHashAfter, err := FetchRemoteHash(context.Background(), client, ts.URL, "diff-test", "secret-token")
+	if err != nil {
+		t.Fatalf("FetchRemoteHash after second upload: %v", err)
+	}
+	if remoteHashAfter != localHash2 {
+		t.Fatalf("remote hash should match v2 after upload: remote=%q local=%q", remoteHashAfter, localHash2)
+	}
+}
+
+func TestFetchRemoteHashNotFound(t *testing.T) {
+	uploadsDir := t.TempDir()
+	presentationDir := t.TempDir()
+
+	server := notes.NewServer(notes.ServerConfig{
+		Hostname:          "127.0.0.1",
+		Port:              0,
+		PresentationDir:   presentationDir,
+		PresentationIndex: "/index.html",
+		PresentationsDir:  uploadsDir,
+		AccessToken:       "secret-token",
+	})
+	ts := httptest.NewServer(server.Mux)
+	defer ts.Close()
+
+	client := ts.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
+	// Fetch hash for non-existent presentation
+	hash, err := FetchRemoteHash(context.Background(), client, ts.URL, "does-not-exist", "secret-token")
+	if err != nil {
+		t.Fatalf("FetchRemoteHash for missing: %v", err)
+	}
+	if hash != "" {
+		t.Fatalf("expected empty hash for missing presentation, got %q", hash)
 	}
 }
 
