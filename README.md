@@ -46,22 +46,29 @@ Legacy camelCase server flags such as `--presentationDir` and `--accessToken` st
 ### Targets
 
 ```bash
-make                  # Build both binaries for current platform
-make build-linux-amd64
-make build-linux-arm64
-make build-windows-amd64
-make build-darwin-amd64    # Intel Mac
-make build-darwin-arm64    # Apple Silicon (M1/M2/M3)
-make cross             # Build all platforms into dist/
-make build-upload         # Build the upload CLI
-make run               # Build and run
-make test              # Run tests
-make vet               # Run static analysis
-make fmt               # Format code
-make tidy              # Tidy module dependencies
-make clean             # Remove local binaries
-make distclean         # Remove all build artifacts
-make help              # Show all targets
+make                       # Build both binaries for current platform
+make dist-build             # Build both binaries into dist/ for the current platform
+make release-package        # Build + package both binaries into a tar.gz
+make build-linux-amd64      # Build notes-server for linux/amd64
+make build-upload-linux-amd64
+make build-linux-arm64      # Build notes-server for linux/arm64
+make build-upload-linux-arm64
+make build-windows-amd64    # Build notes-server for windows/amd64
+make build-upload-windows-amd64
+make build-darwin-amd64     # Build notes-server for Intel Mac
+make build-upload-darwin-amd64
+make build-darwin-arm64     # Build notes-server for Apple Silicon
+make build-upload-darwin-arm64
+make cross                  # Build both binaries for all platforms into dist/
+make build-upload           # Build the upload CLI
+make run                    # Build and run
+make test                   # Run tests
+make vet                    # Run static analysis
+make fmt                    # Format code
+make tidy                   # Tidy module dependencies
+make clean                  # Remove local binaries
+make distclean              # Remove all build artifacts
+make help                   # Show all targets
 ```
 
 ### Custom builds
@@ -70,9 +77,26 @@ Override `GOOS` and `GOARCH` for any Go-supported target:
 
 ```bash
 make build GOOS=linux GOARCH=arm GOARM=7   # Raspberry Pi (ARMv7)
+make release-package VERSION=v1.2.3 GOOS=linux GOARCH=arm64
 ```
 
 Go cross-compilation is lightweight — no special toolchains required. A full `make cross` of all 5 platforms completes in a few seconds.
+
+## Nix
+
+This repository also ships a Nix flake. Common entry points:
+
+```bash
+nix build .#notes-server
+nix build .#upload-presentation
+nix run .
+nix run .#upload-presentation -- --server-url=http://127.0.0.1:1947 --html-file=./public/index.html
+nix develop
+```
+
+The NixOS module is exposed as `nixosModules.default` and configures the
+`services.remote-notes-server` service. See `docs/nix.md` for a fuller
+walkthrough and a NixOS example.
 
 ## Project Structure
 
@@ -80,9 +104,17 @@ Go cross-compilation is lightweight — no special toolchains required. A full `
 remote-notes-server/
 ├── go.mod / go.sum          # Go module definition
 ├── Makefile                 # Build automation
+├── flake.nix / flake.lock    # Nix package/app/devShell/module outputs
 ├── cmd/
-│   └── notes-server/
-│       └── main.go          # Entry point — parses flags, starts server
+│   ├── notes-server/
+│   │   └── main.go          # Entry point — parses flags, starts server
+│   └── upload-presentation/
+│       └── main.go          # Upload helper CLI
+├── docs/
+│   └── nix.md               # Nix build/run/module docs
+├── nix/
+│   ├── package.nix          # buildGoModule definition for both binaries
+│   └── module.nix           # NixOS service module
 ├── manifest.yaml            # Runtime manifest for the publisher
 └── internal/
     └── notes/
