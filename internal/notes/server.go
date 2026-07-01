@@ -191,6 +191,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("PUT /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleUploadPresentation(presStore)))
 	mux.HandleFunc("GET /api/presentations", requireAccessToken(cfg.AccessToken, HandleListPresentations(presStore)))
 	mux.HandleFunc("DELETE /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleDeletePresentation(presStore)))
+	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken(cfg.AccessToken, HandleGetPresentationHash(presStore)))
 
 // Browser auth entry points.
 	mux.HandleFunc("GET /login", auth.loginHandler())

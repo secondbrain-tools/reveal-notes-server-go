@@ -104,6 +104,16 @@ func pollHandshake(t *testing.T, ts *testServer, query string, connectBody strin
 	return open.SID, pr2.first(), http.StatusOK
 }
 
+
+// pollReject opens a polling handshake against the test server and
+// returns the HTTP status code. Used to assert that the HTTP edge
+// rejects handshakes before the Socket.IO middleware sees them.
+func pollReject(t *testing.T, ts *testServer, query string) int {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling"+query, nil)
+	return ts.Do(req).Code
+}
+
 // connectPacket is the JSON body the socket.io client sends for a CONNECT
 // packet on the default namespace. Socket.IO wraps the client's `auth`
 // option under an "auth" key, so the data is `{"auth": {"token": "..."}}`.
@@ -158,21 +168,37 @@ func TestSocketIOConnectionRejectsMissingToken(t *testing.T) {
 	}
 }
 
-func TestSocketIOConnectionRejectsBadAuthPayload(t *testing.T) {
+func TestSocketIOConnectionAcceptsQueryTokenAlone(t *testing.T) {
 	ts := newAuthTestServerWithToken(t, "secret")
 
-	// Correct query string token (so we pass the edge) but wrong auth
-	// payload in the CONNECT — the connection middleware should reject.
+	// Per design: query.token alone is sufficient. The auth payload
+	// in the CONNECT packet is a parallel channel — having it wrong
+	// must NOT cause a rejection when the query token is correct.
+	// (Useful for Firefox where auth.payload may be sent before
+	//  query.token parsing; either one is enough.)
 	_, first, code := pollHandshake(t, ts, "&token=secret", connectPacket("nope"))
 	if code != http.StatusOK {
-		t.Fatalf("expected 200 (edge accepts), got %d", code)
+		t.Fatalf("expected 200 (edge accepts correct query token), got %d", code)
 	}
-	// CONNECT_ERROR is socket.io type 4 wrapped in engine.io MESSAGE type 4.
-	if !strings.HasPrefix(first, "44{") {
-		t.Fatalf("expected CONNECT_ERROR (44{...}), got %q", first)
+	// CONNECT ACK is socket.io type 0 wrapped in engine.io MESSAGE type 4
+	// — the "40" prefix. A wrong auth.payload with a correct query.token
+	// must NOT produce a CONNECT_ERROR (44{...}).
+	if strings.HasPrefix(first, "44{") {
+		t.Fatalf("unexpected CONNECT_ERROR with valid query token: %q", first)
 	}
-	if !strings.Contains(first, "unauthorized") {
-		t.Fatalf("expected unauthorized message, got %q", first)
+	if !strings.HasPrefix(first, "40{") {
+		t.Fatalf("expected CONNECT ACK (40{...}), got %q", first)
+	}
+}
+
+func TestSocketIOConnectionRejectsWhenQueryTokenWrong(t *testing.T) {
+	ts := newAuthTestServerWithToken(t, "secret")
+
+	// With wrong query.token, the HTTP edge rejects the polling
+	// handshake before the Socket.IO middleware ever sees it.
+	code := pollReject(t, ts, "&token=nope")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong query token, got %d", code)
 	}
 }
 

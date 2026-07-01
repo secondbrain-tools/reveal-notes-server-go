@@ -9,7 +9,7 @@ import (
 func TestWrapSocketCORSPreflight(t *testing.T) {
 	ts := newAuthTestServerWithToken(t, "secret")
 	req := httptest.NewRequest(http.MethodOptions, "/socket.io/?EIO=4&transport=polling", nil)
-	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Origin", "http://127.0.0.1")
 	resp := ts.Do(req)
 	
 	if resp.Code != http.StatusNoContent {
@@ -17,8 +17,8 @@ func TestWrapSocketCORSPreflight(t *testing.T) {
 	}
 	
 	origin := resp.Header().Get("Access-Control-Allow-Origin")
-	if origin != "http://example.com" {
-		t.Fatalf("expected Access-Control-Allow-Origin: http://example.com, got %q", origin)
+	if origin != "http://127.0.0.1" {
+		t.Fatalf("expected Access-Control-Allow-Origin: http://127.0.0.1, got %q", origin)
 	}
 	
 	if resp.Header().Get("Access-Control-Allow-Credentials") != "true" {
@@ -29,7 +29,7 @@ func TestWrapSocketCORSPreflight(t *testing.T) {
 func TestWrapSocketCORSSetsHeadersOnRejection(t *testing.T) {
 	ts := newAuthTestServerWithToken(t, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&t=test", nil)
-	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Origin", "http://127.0.0.1")
 	resp := ts.Do(req)
 	
 	if resp.Code != http.StatusUnauthorized {
@@ -37,7 +37,7 @@ func TestWrapSocketCORSSetsHeadersOnRejection(t *testing.T) {
 	}
 	
 	origin := resp.Header().Get("Access-Control-Allow-Origin")
-	if origin != "http://example.com" {
+	if origin != "http://127.0.0.1" {
 		t.Fatalf("expected Access-Control-Allow-Origin on error response, got %q", origin)
 	}
 }
@@ -47,13 +47,13 @@ func TestWrapSocketCORSDisabledWhenNoAccessToken(t *testing.T) {
 	// through to engine.io, which handles CORS itself.
 	ts := newAuthTestServerWithToken(t, "")
 	req := httptest.NewRequest(http.MethodOptions, "/socket.io/?EIO=4&transport=polling", nil)
-	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Origin", "http://127.0.0.1")
 	resp := ts.Do(req)
 
 	if resp.Code != http.StatusNoContent {
 		t.Fatalf("expected 204 from engine.io CORS handling, got %d", resp.Code)
 	}
-	if origin := resp.Header().Get("Access-Control-Allow-Origin"); origin != "http://example.com" {
+	if origin := resp.Header().Get("Access-Control-Allow-Origin"); origin != "http://127.0.0.1" {
 		t.Fatalf("expected engine.io CORS header, got %q", origin)
 	}
 }

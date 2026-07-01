@@ -28,6 +28,9 @@ func newTestServer(t *testing.T) *testServer {
 	// Create a test presentation index file
 	indexContent := "<html><body>Test Presentation</body></html>"
 	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte(indexContent), 0644)
+	// Plus a non-index file the dashboard doesn't intercept — proves the
+	// file server still serves uploaded content at non-root paths.
+	os.WriteFile(filepath.Join(tmpDir, "slides.html"), []byte(indexContent), 0644)
 
 	cfg := ServerConfig{
 		Hostname:          "127.0.0.1",
@@ -94,9 +97,27 @@ func TestHandleRootServesIndex(t *testing.T) {
 		t.Errorf("expected 200, got %d", resp.Code)
 	}
 
+	// After moving the active-sessions dashboard to GET /, the root URL
+	// no longer serves the presentation index. The presentation is now
+	// served at /<not-root> via the file server, and the dashboard takes
+	// over /. Make sure the dashboard renders at / and the presentation
+	// is reachable at /p/{name}/.
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "Test Presentation") {
-		t.Errorf("expected body to contain 'Test Presentation', got: %s", string(body))
+	if !strings.Contains(string(body), "Active Notes Sessions") {
+		t.Errorf("expected body to contain 'Active Notes Sessions', got: %s", string(body))
+	}
+
+	// The presentation content should still be served at non-root paths
+	// via the file server (Go's FileServer cleans /index.html → / which
+	// is now the dashboard, so we request a non-index file instead).
+	presReq := httptest.NewRequest(http.MethodGet, "/slides.html", nil)
+	presResp := ts.Do(presReq)
+	if presResp.Code != http.StatusOK {
+		t.Errorf("expected 200 for /slides.html, got %d", presResp.Code)
+	}
+	presBody, _ := io.ReadAll(presResp.Body)
+	if !strings.Contains(string(presBody), "Test Presentation") {
+		t.Errorf("expected /slides.html to contain 'Test Presentation', got: %s", string(presBody))
 	}
 }
 

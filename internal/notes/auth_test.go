@@ -232,7 +232,7 @@ func TestHasQueryToken(t *testing.T) {
 		expected string
 		want     bool
 	}{
-		{"empty expected never matches", "http://x/?token=abc", "", false},
+		{"empty expected allows any token (open mode)", "http://x/?token=abc", "", true},
 		{"matching token", "http://x/?token=secret", "secret", true},
 		{"wrong token", "http://x/?token=other", "secret", false},
 		{"missing query", "http://x/", "secret", false},
@@ -291,16 +291,23 @@ func TestAuthorizeHandshake(t *testing.T) {
 		t.Fatalf("expected no error for matching query string, got %v", err)
 	}
 
-	// Token configured, handshake is wrong.
-	if err := authorizeHandshake("secret", wrong, q); err == nil {
-		t.Fatal("expected error for mismatched token")
+	// Token configured, BOTH auth payload and query are wrong — must reject.
+	wrongQ := utils.NewParameterBag(map[string][]string{"token": {"nope"}})
+	if err := authorizeHandshake("secret", wrong, wrongQ); err == nil {
+		t.Fatal("expected error when both auth and query tokens are wrong")
 	} else if err.Error() != "unauthorized" {
 		t.Fatalf("expected 'unauthorized' error, got %q", err.Error())
 	}
 
-	// Token configured, handshake is missing.
+	// Token configured, handshake is missing entirely.
 	if err := authorizeHandshake("secret", nil, nil); err == nil {
 		t.Fatal("expected error for missing token")
+	}
+	// Token configured, query has wrong value AND auth payload has wrong
+	// value. Either one being correct is enough (query takes precedence
+	// as the canonical channel).
+	if err := authorizeHandshake("secret", wrong, q); err != nil {
+		t.Fatalf("query.token alone should authorize (auth payload is optional), got %v", err)
 	}
 }
 
