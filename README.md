@@ -1,4 +1,4 @@
-# Reveal Notes Server
+# Reveal Notes Server Go 
 
 A Go-based extension of the [reveal.js speaker notes server plugin](https://github.com/reveal/notes-server).
 
