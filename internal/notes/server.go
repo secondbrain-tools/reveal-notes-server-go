@@ -48,9 +48,6 @@ func NewServer(cfg ServerConfig) *Server {
 	mime.AddExtensionType(".js", "application/javascript")
 	activeTtl := time.Duration(cfg.ActiveTtlMs) * time.Millisecond
 	presentationTtl := time.Duration(cfg.PresentationTtlMs) * time.Millisecond
-	if presentationTtl <= 0 {
-		presentationTtl = 24 * time.Hour
-	}
 	if cfg.PresentationsDir == "" {
 		cfg.PresentationsDir = "presentations"
 	}
@@ -193,7 +190,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("DELETE /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleDeletePresentation(presStore)))
 	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken(cfg.AccessToken, HandleGetPresentationHash(presStore)))
 
-// Browser auth entry points.
+	// Browser auth entry points.
 	mux.HandleFunc("GET /login", auth.loginHandler())
 	mux.HandleFunc("POST /login", auth.loginHandler())
 	mux.HandleFunc("GET /logout", auth.logoutHandler())
@@ -260,21 +257,23 @@ func NewServer(cfg ServerConfig) *Server {
 		}()
 	}
 
-	// Start background pruning for presentations
-	go func() {
-		presPruneInterval := presentationTtl / 2
-		if presPruneInterval < 60*time.Second {
-			presPruneInterval = 60 * time.Second
-		}
-		if presPruneInterval > 1*time.Hour {
-			presPruneInterval = 1 * time.Hour
-		}
-		ticker := time.NewTicker(presPruneInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			presStore.Prune()
-		}
-	}()
+	// Start background pruning for presentations when TTL is enabled.
+	if presentationTtl > 0 {
+		go func() {
+			presPruneInterval := presentationTtl / 2
+			if presPruneInterval < 60*time.Second {
+				presPruneInterval = 60 * time.Second
+			}
+			if presPruneInterval > 1*time.Hour {
+				presPruneInterval = 1 * time.Hour
+			}
+			ticker := time.NewTicker(presPruneInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				presStore.Prune()
+			}
+		}()
+	}
 
 	return srv
 }

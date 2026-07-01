@@ -117,6 +117,38 @@ func TestBuildArchiveValidation(t *testing.T) {
 	})
 }
 
+func TestBuildArchiveResolvesHTMLFileRelativeToCWDWhenNeeded(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	root := t.TempDir()
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	source := filepath.Join(root, "notes-client")
+	mustWriteFile(t, filepath.Join(source, "demo.html"), []byte("<html><body>deck</body></html>"))
+	mustWriteFile(t, filepath.Join(source, "app.js"), []byte("console.log('ok')"))
+
+	archive, err := BuildArchive(ArchiveOptions{
+		SourceDir: source,
+		HTMLFile:  filepath.Join("notes-client", "demo.html"),
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive: %v", err)
+	}
+
+	entries := zipToMap(t, archive)
+	if got := string(entries["index.html"]); got != "<html><body>deck</body></html>" {
+		t.Fatalf("index.html content = %q", got)
+	}
+	if _, ok := entries["app.js"]; !ok {
+		t.Fatal("expected app.js in archive")
+	}
+}
+
 func TestBuildUploadRequest(t *testing.T) {
 	t.Run("with bearer token", func(t *testing.T) {
 		req, err := BuildUploadRequest(context.Background(), "http://example.test/base/", "my-talk", []byte("zipdata"), "secret")

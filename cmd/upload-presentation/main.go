@@ -25,13 +25,13 @@ func main() {
 	var ignores []string
 	var filelist string
 
-pflag.StringVarP(&serverURL, "server-url", "u", "", "Server URL, e.g. http://host:1947 (required)")
-pflag.StringVarP(&name, "name", "n", "", "Presentation slug/name. Inferred from --html-file basename (extension stripped) when --html-file is set and this is omitted.")
-pflag.StringVarP(&sourceDir, "source-dir", "s", "", "Presentation folder to package. Inferred from --html-file's directory when --html-file is set and this is omitted.")
-pflag.StringVarP(&htmlFile, "html-file", "f", "", "Presentation HTML file path (required). When set, --name, --source-dir, and a sibling --filelist can be inferred from it.")
-	pflag.StringVarP(&accessToken, "access-token", "k", "", "Optional bearer token for protected servers")
-	pflag.StringArrayVarP(&ignores, "ignore", "i", nil, "Repeatable gitignore-style ignore pattern")
-pflag.StringVarP(&filelist, "filelist", "l", "", "Optional filelist file defining which relative paths to include. Inferred as '<name>.filelist.txt' next to --html-file when --html-file is set, this is omitted, and the sibling file exists.")
+	pflag.StringVarP(&serverURL, "server-url", "u", "", "Server URL\n  Example: http://host:1947")
+	pflag.StringVarP(&name, "name", "n", "", "Presentation slug\n  Inferred from --html-file when omitted.")
+	pflag.StringVarP(&sourceDir, "source-dir", "s", "", "Presentation folder\n  Inferred from --html-file's directory when omitted.")
+	pflag.StringVarP(&htmlFile, "html-file", "f", "", "Presentation HTML file\n  Required. This is the local deck entry file to package.")
+	pflag.StringVarP(&accessToken, "access-token", "k", "", "Bearer token\n  Optional; send when the server is protected.")
+	pflag.StringArrayVarP(&ignores, "ignore", "i", nil, "gitignore-style pattern\n  Repeat to exclude extra paths from the archive.")
+	pflag.StringVarP(&filelist, "filelist", "l", "", "Filelist path\n  Optional; inferred from a sibling '<name>.filelist.txt'.")
 
 	pflag.StringVar(&sourceDir, "source", "", "Deprecated: use --source-dir instead")
 	pflag.StringVar(&htmlFile, "html", "", "Deprecated: use --html-file instead")
@@ -39,27 +39,16 @@ pflag.StringVarP(&filelist, "filelist", "l", "", "Optional filelist file definin
 	_ = pflag.CommandLine.MarkDeprecated("source", "use --source-dir instead")
 	_ = pflag.CommandLine.MarkDeprecated("html", "use --html-file instead")
 
-pflag.Usage = func() {
+	pflag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		pflag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nREQUIRED\n")
+		fmt.Fprintf(os.Stderr, "  --server-url : notes server address\n")
+		fmt.Fprintf(os.Stderr, "  --html-file  : local HTML file to package and upload\n")
 		fmt.Fprintf(os.Stderr, "\nINFERENCE FROM --html-file\n")
-		fmt.Fprintf(os.Stderr, "  When --html-file is set, the following flags can be omitted and will be\n")
-		fmt.Fprintf(os.Stderr, "  derived from its path. Explicit values always win over inference.\n")
-		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Fprintf(os.Stderr, "    --name       ← basename of --html-file with its extension stripped\n")
-		fmt.Fprintf(os.Stderr, "                  e.g. --html-file=…/my-talk.html → --name=my-talk\n")
-		fmt.Fprintf(os.Stderr, "    --source-dir ← directory containing --html-file\n")
-		fmt.Fprintf(os.Stderr, "                  e.g. --html-file=…/out/my-talk.html → --source-dir=…/out\n")
-		fmt.Fprintf(os.Stderr, "    --filelist   ← '<name>.filelist.txt' sibling of --html-file, used only\n")
-		fmt.Fprintf(os.Stderr, "                  when that file exists. Missing siblings are reported as\n")
-		fmt.Fprintf(os.Stderr, "                  '(not found)' in the inference summary printed to stderr.\n")
-		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Fprintf(os.Stderr, "  Example (full inference from --html-file only):\n")
-		fmt.Fprintf(os.Stderr, "    %s --server-url=http://host:1947 \\\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "      --html-file=…/out/my-talk.html\n")
-		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Fprintf(os.Stderr, "  The actual resolved values (with origin tags) are printed to stderr at\n")
-		fmt.Fprintf(os.Stderr, "  startup so you can verify the inference before the upload runs.\n")
+		fmt.Fprintf(os.Stderr, "  --name       : basename of --html-file\n")
+		fmt.Fprintf(os.Stderr, "  --source-dir : directory containing --html-file\n")
+		fmt.Fprintf(os.Stderr, "  --filelist   : sibling '<name>.filelist.txt' if present\n")
 	}
 
 	pflag.Parse()

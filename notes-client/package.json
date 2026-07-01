@@ -1,0 +1,13 @@
+{
+  "name": "remote-notes-client",
+  "version": "0.1.0",
+  "description": "Reusable browser client and demo for remote-notes-server speaker notes",
+  "main": "remote-notes-client.js",
+  "files": [
+    "demo.html",
+    "manifest.yaml",
+    "remote-notes-client.js",
+    "presentation-libs/socket.io.js"
+  ],
+  "license": "MIT"
+}

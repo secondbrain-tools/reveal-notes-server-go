@@ -192,7 +192,17 @@ func resolveHTMLFilePath(sourceAbs, htmlFile string) (string, error) {
 	if filepath.IsAbs(htmlFile) {
 		return htmlFile, nil
 	}
-	return filepath.Join(sourceAbs, htmlFile), nil
+
+	candidate := filepath.Join(sourceAbs, htmlFile)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+
+	abs, err := filepath.Abs(htmlFile)
+	if err != nil {
+		return "", fmt.Errorf("resolve html file: %w", err)
+	}
+	return abs, nil
 }
 
 type zipEntryKind int

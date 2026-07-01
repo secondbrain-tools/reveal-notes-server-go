@@ -83,8 +83,8 @@ func TestNewServerAppliesDefaults(t *testing.T) {
 	if s.Config.PresentationsDir != "presentations" {
 		t.Fatalf("expected default presentations dir, got %q", s.Config.PresentationsDir)
 	}
-	if s.PresentationTtl != 24*time.Hour {
-		t.Fatalf("expected default presentation TTL of 24h, got %v", s.PresentationTtl)
+	if s.PresentationTtl != 0 {
+		t.Fatalf("expected default presentation TTL of never, got %v", s.PresentationTtl)
 	}
 }
 
