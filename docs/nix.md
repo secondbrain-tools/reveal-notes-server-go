@@ -49,44 +49,76 @@ Enter a shell with Go and Make available:
 nix develop
 ```
 
-## NixOS module
+## Include in another flake
 
-The module is exposed as `nixosModules.default` and configures the service
-`services.remote-notes-server`.
+You can consume this project from another Nix flake via the exported
+`nixosModules.default` module.
 
 Example:
 
 ```nix
 {
-  inputs.remote-notes-server.url = "github:your-org/remote-notes-server";
+  description = "Mein NixOS Host";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+    remote-notes-server.url = "github:your-org/remote-notes-server";
+
+    # Optional, but recommended:
+    # keep this project on the same nixpkgs as the host.
+    remote-notes-server.inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs = { self, nixpkgs, remote-notes-server, ... }:
     {
-      nixosConfigurations.my-server = nixpkgs.lib.nixosSystem {
+      nixosConfigurations.mein-host = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
+
         modules = [
+          ./configuration.nix
+
           remote-notes-server.nixosModules.default
-          ({ ... }: {
+
+          {
             services.remote-notes-server = {
               enable = true;
               hostname = "0.0.0.0";
               port = 1947;
-              presentationDir = "/srv/remote-notes/presentation";
+              presentationDir = "/var/lib/remote-notes-server/presentation";
               presentationsDir = "/var/lib/remote-notes-server/presentations";
               accessToken = "super-secret-token";
               openFirewall = true;
             };
-          })
+          }
         ];
       };
     };
 }
 ```
 
-The module uses a service-owned writable state directory for uploaded
-presentations and metadata. By default, that state lives under
-`/var/lib/remote-notes-server`.
+The module is exposed as `nixosModules.default` and configures
+`services.remote-notes-server`.
 
+The service uses a writable state directory under
+`/var/lib/remote-notes-server` by default.
+
+## NixOS module options
+
+Common options:
+
+- `services.remote-notes-server.enable`
+- `services.remote-notes-server.hostname`
+- `services.remote-notes-server.port`
+- `services.remote-notes-server.presentationDir`
+- `services.remote-notes-server.presentationsDir`
+- `services.remote-notes-server.presentationIndex`
+- `services.remote-notes-server.presentationTtl`
+- `services.remote-notes-server.activeTtlMs`
+- `services.remote-notes-server.accessToken`
+- `services.remote-notes-server.idleShutdownMs`
+- `services.remote-notes-server.openFirewall`
+- `services.remote-notes-server.extraFlags`
 ## Updating the vendor hash
 
 `nix/package.nix` uses `buildGoModule`, so the Go module vendor hash must match

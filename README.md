@@ -122,7 +122,11 @@ nix run .
 nix develop
 ```
 
-See `docs/nix.md` for the NixOS module example.
+This flake also exports a NixOS module as `nixosModules.default`.
+You can import it from another flake and configure
+`services.remote-notes-server`.
+
+See `docs/nix.md` for a complete example.
 
 ## License
 
