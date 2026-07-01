@@ -189,9 +189,15 @@
 				font-size: 20px;
 				transition: color 0.3s ease;
 			}
-			#connection-status .connection-dot.connected { color: #4CAF50; }
-			#connection-status .connection-dot.disconnected { color: #F44336; }
-			#connection-status .connection-dot.connecting { color: #FF9800; }
+/* Three-state connection indicator:
+				 *   - offline : cannot reach the notes server (red)
+				 *   - server  : connected to the notes server, but no
+				 *               presentation client has signaled yet (blue)
+				 *   - slides  : a presentation client is actively sending
+				 *               state to our socketId (green) */
+			#connection-status .connection-dot.offline { color: #F44336; }
+			#connection-status .connection-dot.server  { color: #2196F3; }
+			#connection-status .connection-dot.slides  { color: #4CAF50; }
 
 			/* Speaker layout: Wide */
 			body[data-speaker-layout="wide"] #current-slide,
@@ -430,18 +436,37 @@
 				connText.textContent = label;
 			}
 
-			socket.on( 'connect', function() {
-				setConnectionStatus( 'connected', 'Connected' );
-			} );
-			socket.on( 'disconnect', function() {
-				setConnectionStatus( 'disconnected', 'Disconnected' );
-			} );
-			socket.on( 'connect_error', function() {
-				setConnectionStatus( 'disconnected', 'Offline' );
-			} );
+// Three-state connection indicator:
+//   offline : cannot reach the notes server (red)
+//   server  : connected to the notes server, no presentation client
+//             has sent state to our socketId yet (blue)
+//   slides  : a presentation client is actively sending state to our
+//             socketId — same as the presenter's "live" view (green)
+			var slidesActive = false;
+			function setConnectionStatus( state, label ) {
+				connDot.className = 'connection-dot ' + state;
+				connText.textContent = label;
+			}
+			function noteSlidesActive() {
+				if (slidesActive) return;
+				slidesActive = true;
+				setConnectionStatus('slides', 'Slides');
+			}
+			socket.on('connect', function() {
+				slidesActive = false;
+				setConnectionStatus('server', 'Server');
+			});
+			socket.on('disconnect', function() {
+				slidesActive = false;
+				setConnectionStatus('offline', 'Offline');
+			});
+			socket.on('connect_error', function() {
+				slidesActive = false;
+				setConnectionStatus('offline', 'Offline');
+			});
 
 			// Set initial state
-			setConnectionStatus( 'connecting', 'Connecting…' );
+			setConnectionStatus('offline', 'Offline');
 
 			var SPEAKER_LAYOUTS = {
 				'default': 'Default',
@@ -451,23 +476,43 @@
 				'preview-only': 'Preview only'
 			};
 
-			socket.on( 'statechanged', function( data ) {
-
-				// ignore data from sockets that aren't ours
-				if( data.socketId !== socketId ) { return; }
-
-				if( connected === false ) {
+			// The "Slides" indicator (green) should reflect whether a
+			// presentation is *open* on the same socketId, not whether a
+			// slide is currently changing. We use two signals:
+			//   - new-subscriber  : the server broadcasts this when ANY
+			//     client subscribes; receiving it means a presentation
+			//     client is now connected.
+			//   - statechanged     : the presentation client sends this on
+			//     every slide change.
+			// Both keep a heartbeat fresh. If we go 10s without either, we
+			// assume the presentation was closed and drop back to "server"
+			// (blue).
+			var slidesHeartbeat = null;
+			function markSlidesActive() {
+				noteSlidesActive();
+				if (slidesHeartbeat) clearTimeout(slidesHeartbeat);
+				slidesHeartbeat = setTimeout(function() {
+				if (slidesActive) {
+					slidesActive = false;
+					setConnectionStatus('server', 'Server');
+				}
+				}, 5000);
+			}
+			socket.on('new-subscriber', function(data) {
+				if (!data || data.socketId !== socketId) return;
+				markSlidesActive();
+			});
+			socket.on('statechanged', function(data) {
+				if (data.socketId !== socketId) return;
+				markSlidesActive();
+				if (connected === false) {
 					connected = true;
-
 					setupKeyboard();
 					setupNotes();
 					setupTimer();
-
 				}
-
-				handleStateMessage( data );
-
-			} );
+				handleStateMessage(data);
+			});
 
 			setupLayout();
 
