@@ -51,8 +51,9 @@ It can infer missing parameters from `--html-file`.
 | `--active-ttl-ms` | `-a` | `7200000` | Session TTL in milliseconds (2h) |
 | `--access-token` | `-k` | (empty) | Optional bearer token for browser/API auth |
 | `--presentations-dir` | `-u` | `presentations` | Directory for uploaded presentations; created on startup if missing |
-| `--presentation-ttl-ms` | `-t` | `86400000` | TTL for uploaded presentations in milliseconds (24h) |
+| `--presentation-ttl` | `-t` | `never` | TTL for uploaded presentations (`never` disables pruning; supports Go durations plus `d`, e.g. `7d`, `4h30m`) |
 | `--idle-shutdown-ms` | `-s` | `0` | Shut down after all clients disconnect for this many milliseconds |
+
 
 ### `upload-presentation`
 
@@ -82,7 +83,7 @@ The CLI prints the resolved values at startup so you can verify the inference be
 2. The chosen `--html-file` becomes `index.html` inside the archive
 3. Ignore patterns and optional filelists filter the packaged files
 4. The archive is uploaded to `POST /api/presentations/{name}`
-5. The server stores it under `--presentations-dir/{name}` and auto-removes it after `--presentation-ttl-ms`
+5. The server stores it under `--presentations-dir/{name}` and auto-removes it after `--presentation-ttl`
 
 ## Authentication
 
