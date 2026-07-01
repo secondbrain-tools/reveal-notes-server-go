@@ -98,6 +98,54 @@ func authorizeHandshake(expected string, authPayload map[string]any, query *util
 	return errors.New("unauthorized")
 }
 
+// authenticatedViaCookieHeader parses a raw Cookie header value and
+// returns true if it contains a valid HMAC-signed session cookie.
+// Used by Socket.IO middleware as a fallback when Firefox strips
+// cookies from the JS-visible API on WebSocket upgrades.
+func authenticatedViaCookieHeader(cookieHeader, token string) bool {
+	if token == "" {
+		return true
+	}
+	for _, part := range strings.Split(cookieHeader, ";") {
+		part = strings.TrimSpace(part)
+		eq := strings.IndexByte(part, '=')
+		if eq <= 0 {
+			continue
+		}
+		name, val := part[:eq], part[eq+1:]
+		if name == browserAuthCookieName && validSessionCookieValue(val, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// validSessionCookieValue verifies that `value` is a well-formed,
+// non-expired HMAC-signed session cookie. Used as a fallback in
+// Socket.IO middleware so a `query.token` carrying the cookie value
+// (forwarded by the speaker view's JS as a Firefox belt-and-braces)
+// is accepted instead of the configured access token.
+func validSessionCookieValue(value, token string) bool {
+	if token == "" {
+		return true
+	}
+	parts := strings.SplitN(value, ".", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	expiresUnix, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return false
+	}
+	if now().UTC().Unix() > expiresUnix {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(parts[0]))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expected)) == 1
+}
+
 // queryString returns a flat string of the query for logging without
 // dumping a struct full of internal fields.
 func queryString(q *utils.ParameterBag) string {
@@ -120,6 +168,14 @@ func (a *browserAuth) authenticated(r *http.Request) bool {
 		return true
 	}
 	if hasQueryToken(r, a.token) {
+		return true
+	}
+	// Belt-and-braces: the speaker view JS may forward the cookie VALUE
+	// as ?token= when Firefox strips the cookie on WebSocket upgrades.
+	// The cookie value is itself a valid HMAC-signed assertion, so
+	// accepting it here is symmetric with accepting it from the
+	// Cookie header below.
+	if t := r.URL.Query().Get("token"); t != "" && validSessionCookieValue(t, a.token) {
 		return true
 	}
 	cookie, err := r.Cookie(browserAuthCookieName)

@@ -79,11 +79,26 @@ func NewServer(cfg ServerConfig) *Server {
 		AccessToken:     cfg.AccessToken,
 		IdleShutdown:    idleShutdown,
 	}
-// Defense-in-depth: reject Socket.IO handshakes that don't carry a
+
+	// Single shared browserAuth instance — used both by Socket.IO
+	// middleware (below) and the HTTP mux routes (further down).
+	auth := newBrowserAuth(cfg.AccessToken)
+
+	// Defense-in-depth: reject Socket.IO handshakes that don't carry a
 	// valid access token. wrapSocket() already enforces this at the
 	// HTTP polling layer, but Socket.IO's WebSocket upgrade bypasses
 	// mux routing entirely — without this middleware the upgrade would
 	// succeed with an empty auth payload.
+	//
+	// We accept any one of:
+	//   1. auth.token / query.token matching the configured access token
+	//      (the standard Socket.IO query path).
+	//   2. The request's Cookie header carrying a valid HMAC-signed
+	//      session cookie (works for chromium's WebSocket upgrade).
+	//   3. The query.token being a valid session cookie VALUE (the
+	//      speaker view's JS reads the cookie and forwards it as
+	//      query.token for Firefox, where the cookie is stripped on
+	//      WebSocket upgrade).
 	if cfg.AccessToken != "" {
 		sio.Use(func(so *socket.Socket, next func(*socket.ExtendedError)) {
 			hs := so.Handshake()
@@ -93,11 +108,32 @@ func NewServer(cfg ServerConfig) *Server {
 					"auth": hs.Auth,
 				}
 			}
-			if err := authorizeHandshake(cfg.AccessToken, authPayload, hs.Query); err != nil {
-				next(socket.NewExtendedError("unauthorized", nil))
+			if err := authorizeHandshake(cfg.AccessToken, authPayload, hs.Query); err == nil {
+				log.Printf("[auth] sio.Use: accepted via query/auth token")
+				next(nil)
 				return
 			}
-			next(nil)
+			// Fallback 2: cookie header (chromium WebSocket upgrade)
+			if headers := so.Request().Headers(); headers != nil {
+				if cookieHeader := headers.Peek("Cookie"); cookieHeader != "" {
+					if authenticatedViaCookieHeader(cookieHeader, cfg.AccessToken) {
+						log.Printf("[auth] sio.Use: accepted via Cookie header")
+						next(nil)
+						return
+					}
+				}
+			}
+			// Fallback 3: query.token is itself a valid session cookie value
+			// (Firefox belt-and-braces: JS forwards the cookie it already has)
+			if hs != nil && hs.Query != nil {
+				if v, _ := hs.Query.Get("token"); v != "" && validSessionCookieValue(v, cfg.AccessToken) {
+					log.Printf("[auth] sio.Use: accepted via query.token=cookie value")
+					next(nil)
+					return
+				}
+			}
+			log.Printf("[auth] sio.Use: REJECTED handshake")
+			next(socket.NewExtendedError("unauthorized", nil))
 		})
 	}
 
@@ -149,7 +185,6 @@ func NewServer(cfg ServerConfig) *Server {
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
-	auth := newBrowserAuth(cfg.AccessToken)
 
 	// API endpoints for presentation upload/management (auth-protected)
 	mux.HandleFunc("POST /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleUploadPresentation(presStore)))
@@ -197,17 +232,15 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("GET /notes/", dashboardHandler)
 	mux.HandleFunc("GET /notes/{socketId}", auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir, cfg.AccessToken)))
 
-	// Static file serving and root handler
-	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))
-	rootHandler := HandleRoot(cfg.PresentationDir, cfg.PresentationIndex)
-	mux.HandleFunc("/", auth.wrapPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			rootHandler(w, r)
-			return
-		}
+	// Root URL → dashboard (active sessions with links to speaker views).
+	// The presentation file server below still catches every other path,
+	// so /p/{NAME}/ etc. continue to work. `?qr=true` and other unknown
+	// query params on / are ignored — the dashboard renders regardless.
+	mux.HandleFunc("GET /{$}", auth.wrapPage(HandleDashboard(store, activeTtl)))
 
-		presentationFS.ServeHTTP(w, r)
-	})))
+	// Static file serving for uploaded presentations and any other files.
+	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))
+	mux.Handle("/", auth.wrapPage(presentationFS))
 
 	srv.Mux = mux
 

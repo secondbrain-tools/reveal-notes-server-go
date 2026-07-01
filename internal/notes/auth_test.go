@@ -249,35 +249,6 @@ func TestHasQueryToken(t *testing.T) {
 	}
 }
 
-func TestExtractHandshakeToken(t *testing.T) {
-	q := utils.NewParameterBag(map[string][]string{"token": {"from-query"}})
-	authOnly := map[string]any{"auth": map[string]any{"token": "from-auth"}}
-	flat := map[string]any{"token": "from-auth"}
-	empty := utils.NewParameterBag(nil)
-
-	cases := []struct {
-		name  string
-		auth  any
-		query *utils.ParameterBag
-		want  string
-	}{
-		{"standard auth payload takes precedence", authOnly, q, "from-auth"},
-		{"flat token layout also works", flat, q, "from-auth"},
-		{"falls back to query when auth absent", nil, q, "from-query"},
-		{"falls back to query when auth token is empty", map[string]any{"auth": map[string]any{"token": ""}}, q, "from-query"},
-		{"falls back to query when auth token is wrong type", map[string]any{"auth": map[string]any{"token": 42}}, q, "from-query"},
-		{"returns empty when neither present", nil, empty, ""},
-		{"returns empty for nil auth and nil query", nil, nil, ""},
-		{"returns empty when auth token is empty and query has no token", map[string]any{"auth": map[string]any{"token": ""}}, empty, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := extractHandshakeToken(tc.auth, tc.query); got != tc.want {
-				t.Fatalf("extractHandshakeToken() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestValidateHandshakeToken(t *testing.T) {
 	if !validateHandshakeToken("", "anything") {

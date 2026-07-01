@@ -412,16 +412,24 @@
 				} catch (e) { /* best-effort */ }
 			})();
 
-			// If a token was passed in the URL, forward it on the
-			// Socket.IO connection too. This is the belt-and-braces
-			// counterpart to the cookie handoff: some browsers (notably
-			// Firefox) drop cookies on cross-origin WebSocket upgrade
-			// requests even when they keep them on XHR. Passing the token
-			// as a query param on the connection makes the auth work
-			// regardless of cookie behavior.
-			var socket = connectToken
+			// Forward SOMETHING on the Socket.IO connection so the server can
+			// authenticate the WebSocket upgrade. Priority:
+			//   1. URL ?token= (explicit token from the publisher link)
+			//   2. remote_notes_session cookie value (Firefox strips cookies on
+			//      cross-origin WebSocket upgrades even when it keeps them on
+			//      XHR, so we forward the cookie value as the query token).
+			//   3. nothing — connection will fail in Firefox but works in
+			//      chromium where the cookie is still sent in the upgrade headers.
+			function readSessionCookie() {
+				var m = document.cookie.match(
+					/(?:^|;\s*)remote_notes_session=([^;]+)/
+				);
+				return m ? m[1] : null;
+			}
+			var socketAuthToken = connectToken || readSessionCookie();
+			var socket = socketAuthToken
 				? io.connect(window.location.origin, {
-					query: { token: connectToken }
+					query: { token: socketAuthToken }
 				  })
 				: io.connect(window.location.origin),
 				socketId = '{{socketId}}';
@@ -595,8 +603,13 @@
 					'backgroundTransition=none'
 				].join( '&' );
 
-			var currentURL = '{{presentationUrl}}?' + params + '&postMessageEvents=true';
-			var upcomingURL = '{{presentationUrl}}?' + params + '&controls=false';
+			// presentationUrl is empty when no presentation has been uploaded
+			// for this socketId — use about:blank so the iframes don't try to
+			// load the speaker view itself (which would be a relative ?params).
+			var presentationUrl = '{{presentationUrl}}';
+			if (!presentationUrl) { presentationUrl = 'about:blank'; }
+			var currentURL = presentationUrl + '?' + params + '&postMessageEvents=true';
+			var upcomingURL = presentationUrl + '?' + params + '&controls=false';
 
 				currentSlide = document.createElement( 'iframe' );
 				currentSlide.setAttribute( 'width', 1280 );

@@ -156,10 +156,6 @@ const dashboardHTML = `<!doctype html>
     <header class="top">
       <h1>Active Notes Sessions</h1>
       <p class="sub">Sessions auto-expire after {{.ActiveTtlMinutes}} minutes of inactivity.</p>
-      <div class="links">
-        <a class="chip" href="/notes/sessions" target="_blank" rel="noopener">JSON API</a>
-        <a class="chip" href="/" target="_blank" rel="noopener">Open Slides</a>
-      </div>
     </header>
     <section class="grid">
       {{if .SessionCards}}
@@ -339,13 +335,12 @@ func HandleSpeakerView(store *SessionStore, presentationsDir, accessToken string
 		content := string(speakerViewHTML)
 
 		// If the presentation exists in the upload directory, serve iframes
-		// from /p/{name}/; otherwise fall back to the root presentation.
+		// from /p/{name}/. Otherwise leave the iframe URL empty so the
+		// preview area shows a placeholder rather than the dashboard.
 		var presentationURL string
 		presDir := filepath.Join(presentationsDir, socketId)
 		if _, err := os.Stat(presDir); err == nil {
 			presentationURL = "/p/" + socketId + "/"
-		} else {
-			presentationURL = "/"
 		}
 
 		content = strings.ReplaceAll(content, "{{socketId}}", socketId)
