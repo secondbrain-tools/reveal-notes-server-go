@@ -7,13 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"fmt"
 	"html/template"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zishang520/engine.io/utils"
@@ -22,27 +24,196 @@ import (
 const (
 	browserAuthCookieName = "remote_notes_session"
 	browserAuthCookieTTL  = 8 * time.Hour
+
+	authThrottleFailureLimit  = 5
+	authThrottleFailureWindow = 5 * time.Minute
+	authThrottleLockout       = 15 * time.Minute
 )
 
+type authAttemptThrottle struct {
+	mu       sync.Mutex
+	attempts map[string]*authAttemptState
+}
+
+type authAttemptState struct {
+	failures     int
+	firstFailure time.Time
+	blockedUntil time.Time
+}
+
+func newAuthAttemptThrottle() *authAttemptThrottle {
+	return &authAttemptThrottle{attempts: make(map[string]*authAttemptState)}
+}
+
+func (t *authAttemptThrottle) clientKey(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil && host != "" {
+		return host
+	}
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return "<unknown>"
+}
+
+func (t *authAttemptThrottle) limited(r *http.Request) bool {
+	if t == nil {
+		return false
+	}
+	key := t.clientKey(r)
+	now := now().UTC()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	st := t.attempts[key]
+	if st == nil {
+		return false
+	}
+	if !st.blockedUntil.IsZero() && now.Before(st.blockedUntil) {
+		return true
+	}
+	if !st.blockedUntil.IsZero() && !now.Before(st.blockedUntil) {
+		st.blockedUntil = time.Time{}
+		st.failures = 0
+		st.firstFailure = now
+	}
+	if !st.firstFailure.IsZero() && now.Sub(st.firstFailure) > authThrottleFailureWindow {
+		delete(t.attempts, key)
+		return false
+	}
+	return false
+}
+
+func (t *authAttemptThrottle) recordFailure(r *http.Request) bool {
+	if t == nil {
+		return false
+	}
+	key := t.clientKey(r)
+	now := now().UTC()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	st := t.attempts[key]
+	if st == nil {
+		st = &authAttemptState{firstFailure: now}
+		t.attempts[key] = st
+	}
+	if !st.blockedUntil.IsZero() && now.Before(st.blockedUntil) {
+		return true
+	}
+	if st.blockedUntil.IsZero() && !st.firstFailure.IsZero() && now.Sub(st.firstFailure) > authThrottleFailureWindow {
+		st.failures = 0
+		st.firstFailure = now
+	}
+	if st.blockedUntil != (time.Time{}) && !now.Before(st.blockedUntil) {
+		st.blockedUntil = time.Time{}
+		st.failures = 0
+		st.firstFailure = now
+	}
+	if st.firstFailure.IsZero() {
+		st.firstFailure = now
+	}
+	st.failures++
+	if st.failures > authThrottleFailureLimit {
+		st.failures = 0
+		st.firstFailure = now
+		st.blockedUntil = now.Add(authThrottleLockout)
+		return true
+	}
+	return false
+}
+
+func (t *authAttemptThrottle) reset(r *http.Request) {
+	if t == nil {
+		return
+	}
+	key := t.clientKey(r)
+	t.mu.Lock()
+	delete(t.attempts, key)
+	t.mu.Unlock()
+}
+
 type browserAuth struct {
-	token string
+	token    string
+	throttle *authAttemptThrottle
 }
 
 func newBrowserAuth(token string) *browserAuth {
-	return &browserAuth{token: token}
+	return &browserAuth{token: token, throttle: newAuthAttemptThrottle()}
 }
 
 func (a *browserAuth) enabled() bool {
 	return a != nil && a.token != ""
 }
 
+func (a *browserAuth) authThrottled(r *http.Request) bool {
+	return a != nil && a.enabled() && a.throttle != nil && a.throttle.limited(r)
+}
+
+func (a *browserAuth) recordAuthFailure(r *http.Request) bool {
+	if a == nil || !a.enabled() || a.throttle == nil {
+		return false
+	}
+	return a.throttle.recordFailure(r)
+}
+
+func (a *browserAuth) recordAuthSuccess(r *http.Request) {
+	if a == nil || !a.enabled() || a.throttle == nil {
+		return
+	}
+	a.throttle.reset(r)
+}
+
+func requestAuthChannels(r *http.Request) string {
+	if r == nil {
+		return "<nil>"
+	}
+	sources := make([]string, 0, 3)
+	if r.Header.Get("Authorization") != "" {
+		sources = append(sources, "bearer")
+	}
+	if r.Header.Get("Cookie") != "" {
+		sources = append(sources, "cookie")
+	}
+	if r.URL != nil {
+		if _, ok := r.URL.Query()["token"]; ok {
+			sources = append(sources, "query-token")
+		}
+	}
+	if len(sources) == 0 {
+		return "none"
+	}
+	return strings.Join(sources, ",")
+}
+
+func handshakePresenceSummary(authPayload map[string]any, query *utils.ParameterBag) string {
+	parts := []string{"auth_payload=false", "query_token=false"}
+	if authPayload != nil {
+		parts[0] = "auth_payload=true"
+		if auth, ok := authPayload["auth"].(map[string]any); ok {
+			if _, ok := auth["token"]; ok {
+				parts = append(parts, "auth_token=true")
+			}
+		}
+		if _, ok := authPayload["token"]; ok {
+			parts = append(parts, "auth_token=true")
+		}
+	}
+	if query != nil {
+		if v, _ := query.Get("token"); v != "" {
+			parts[1] = "query_token=true"
+		}
+	}
+	return strings.Join(parts, " ")
+}
 func hasBearerToken(r *http.Request, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) == 1
 }
 
-// validateHandshakeToken reports whether `provided` matches the configured
-// `expected` access token. An empty expected token (i.e. notes server
-// running without --access-token) authorizes every provided value.
 func validateHandshakeToken(expected, provided string) bool {
 	if expected == "" {
 		return true
@@ -66,35 +237,30 @@ func hasQueryToken(r *http.Request, token string) bool {
 // returning a non-nil error if both fail.
 //
 // An empty `expected` token authorizes every handshake (open mode).
-// authorizeHandshake validates a Socket.IO handshake against the configured
-// access token. It checks the auth payload first, then the query string,
-// returning a non-nil error if both fail.
-//
-// An empty `expected` token authorizes every handshake (open mode).
 func authorizeHandshake(expected string, authPayload map[string]any, query *utils.ParameterBag) error {
-	log.Printf("[auth] handshake: expected=%q auth=%+v query=%+v", expected, authPayload, queryString(query))
 	if expected == "" {
+		log.Printf("[auth] handshake: open mode allowed (%s)", handshakePresenceSummary(authPayload, query))
 		return nil
 	}
 	if authPayload != nil {
 		if auth, ok := authPayload["auth"].(map[string]any); ok {
 			if token, _ := auth["token"].(string); validateHandshakeToken(expected, token) {
-				log.Printf("[auth] handshake: accepted via auth payload")
+				log.Printf("[auth] handshake: accepted via auth.payload (%s)", handshakePresenceSummary(authPayload, query))
 				return nil
 			}
 		}
 		if token, _ := authPayload["token"].(string); validateHandshakeToken(expected, token) {
-			log.Printf("[auth] handshake: accepted via auth.token")
+			log.Printf("[auth] handshake: accepted via auth.token (%s)", handshakePresenceSummary(authPayload, query))
 			return nil
 		}
 	}
 	if query != nil {
 		if v, _ := query.Get("token"); validateHandshakeToken(expected, v) {
-			log.Printf("[auth] handshake: accepted via query.token")
+			log.Printf("[auth] handshake: accepted via query.token (%s)", handshakePresenceSummary(authPayload, query))
 			return nil
 		}
 	}
-	log.Printf("[auth] handshake: REJECTED (no matching token)")
+	log.Printf("[auth] handshake: rejected (%s)", handshakePresenceSummary(authPayload, query))
 	return errors.New("unauthorized")
 }
 
@@ -146,20 +312,6 @@ func validSessionCookieValue(value, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expected)) == 1
 }
 
-// queryString returns a flat string of the query for logging without
-// dumping a struct full of internal fields.
-func queryString(q *utils.ParameterBag) string {
-	if q == nil {
-		return "<nil>"
-	}
-	keys := q.Keys()
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, fmt.Sprintf("%s=%q", k, q.Peek(k)))
-	}
-	return "{" + strings.Join(out, ",") + "}"
-}
-
 func (a *browserAuth) authenticated(r *http.Request) bool {
 	if !a.enabled() {
 		return true
@@ -191,6 +343,7 @@ func (a *browserAuth) wrapPage(next http.Handler) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.authenticated(r) {
+			a.recordAuthSuccess(r)
 			// If auth succeeded via a one-time ?token=... query param,
 			// promote it to a signed session cookie. We do NOT redirect
 			// to a clean URL — the browser would drop ?token= from the
@@ -201,7 +354,7 @@ func (a *browserAuth) wrapPage(next http.Handler) http.HandlerFunc {
 			// flight.
 			if t := r.URL.Query().Get("token"); t != "" && hasQueryToken(r, a.token) {
 				a.setSessionCookie(w, r)
-				log.Printf("[auth] wrapPage: served with cookie, ?token= still in URL (JS will strip)")
+				log.Printf("[auth] wrapPage: served with cookie, query token present (JS will strip)")
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -217,42 +370,31 @@ func (a *browserAuth) wrapSocket(next http.Handler) http.HandlerFunc {
 		return next.ServeHTTP
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		authSummary := "?"
-		if c, err := r.Cookie(browserAuthCookieName); err == nil {
-			authSummary = "cookie(set, len=" + strconv.Itoa(len(c.Value)) + ")"
-		}
-		if t := r.Header.Get("Authorization"); t != "" {
-			authSummary += " bearer"
-		}
-		if t := r.URL.Query().Get("token"); t != "" {
-			authSummary += " query-token"
-		}
-		log.Printf("[auth] wrapSocket: %s %s%s origin=%q auth=%s",
-			r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Origin"), authSummary)
-
-		// Always set CORS headers for cross-origin Socket.IO requests,
-		// even when we end up rejecting them. Without this the browser
-		// shows a misleading "No Access-Control-Allow-Origin header"
-		// error for a request that was actually rejected as 401.
-		if origin := r.Header.Get("Origin"); origin != "" && isLocalOrigin(origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		}
+		setCORSHeaders(w, r)
 		// Handle CORS preflight — no auth required for OPTIONS.
 		if r.Method == http.MethodOptions {
-			log.Printf("[auth] wrapSocket: OPTIONS preflight → 204")
+			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=preflight", r.Method, r.URL.Path, r.Header.Get("Origin"), requestAuthChannels(r))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		authSummary := requestAuthChannels(r)
+		if a.authThrottled(r) {
+			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=throttled", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
 		if a.authenticated(r) {
-			log.Printf("[auth] wrapSocket: authenticated, passing through")
+			a.recordAuthSuccess(r)
+			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=accepted", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
 			next.ServeHTTP(w, r)
 			return
 		}
-		log.Printf("[auth] wrapSocket: NOT authenticated → 401")
+		if a.recordAuthFailure(r) {
+			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=throttled", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=rejected", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
@@ -266,35 +408,37 @@ func (a *browserAuth) loginHandler() http.HandlerFunc {
 
 		switch r.Method {
 		case http.MethodGet:
-			returnTo := cleanReturnTo(r.URL.Query().Get("returnTo"))
+			returnTo := cleanLoginReturnTo(r.URL.Query().Get("returnTo"))
 			if a.authenticated(r) {
+				a.recordAuthSuccess(r)
 				http.Redirect(w, r, returnTo, http.StatusSeeOther)
 				return
 			}
 			renderLoginPage(w, returnTo, "", http.StatusOK)
-case http.MethodPost:
+		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
-				renderLoginPage(w, "/", "invalid login form", http.StatusBadRequest)
+				renderLoginPage(w, cleanLoginReturnTo("/"), "invalid login form", http.StatusBadRequest)
 				return
 			}
-			returnTo := cleanReturnTo(r.FormValue("returnTo"))
+			returnTo := cleanLoginReturnTo(r.FormValue("returnTo"))
+			if a.authThrottled(r) {
+				renderLoginPage(w, returnTo, "too many failed attempts", http.StatusTooManyRequests)
+				return
+			}
 			provided := r.FormValue("token")
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
-				renderLoginPage(w, returnTo, "invalid access token", http.StatusUnauthorized)
+				status := http.StatusUnauthorized
+				if a.recordAuthFailure(r) {
+					status = http.StatusTooManyRequests
+				}
+				renderLoginPage(w, returnTo, "invalid access token", status)
 				return
 			}
+			a.recordAuthSuccess(r)
 			a.setSessionCookie(w, r)
-			// Append ?token=... to the redirect so the speaker view's
-			// self-auth JS can capture it and forward it on the
-			// Socket.IO connection. Some browsers (notably Firefox)
-			// drop cookies on cross-origin WebSocket upgrade requests
-			// even when they keep them on XHR. The query param is the
-			// belt-and-braces path that works regardless of cookie
-			// quirks. The speaker view's JS strips it via
-			// history.replaceState as soon as the Socket.IO connect is
-			// queued.
-			tokenParam := url.Values{"token": {provided}}.Encode()
-			http.Redirect(w, r, returnTo+"?"+tokenParam, http.StatusSeeOther)
+			http.Redirect(w, r, returnTo, http.StatusSeeOther)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
 }
@@ -386,6 +530,21 @@ func cleanReturnTo(raw string) string {
 	return (&url.URL{Path: parsed.Path, RawQuery: parsed.RawQuery, Fragment: parsed.Fragment}).String()
 }
 
+func cleanLoginReturnTo(raw string) string {
+	target := cleanReturnTo(raw)
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return target
+	}
+	query := parsed.Query()
+	if _, ok := query["token"]; !ok {
+		return target
+	}
+	query.Del("token")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 var loginPageTemplate = template.Must(template.New("login").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -417,7 +576,6 @@ var loginPageTemplate = template.Must(template.New("login").Parse(`<!doctype htm
       </label>
       <input type="hidden" name="returnTo" value="{{.ReturnTo}}" />
       <button type="submit">Continue</button>
-      <p class="hint">Your session is stored in a secure, HttpOnly cookie.</p>
     </form>
   </main>
 </body>
@@ -435,7 +593,7 @@ func renderLoginPage(w http.ResponseWriter, returnTo, errMsg string, status int)
 }
 
 func (a *browserAuth) redirectToLogin(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/login?returnTo="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+	http.Redirect(w, r, "/login?returnTo="+url.QueryEscape(cleanLoginReturnTo(r.URL.RequestURI())), http.StatusFound)
 }
 
 // tokenExchangeHandler accepts the access token from a cross-origin POST
@@ -448,17 +606,12 @@ func (a *browserAuth) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 // /login redirect — the browser rejects any 3xx on a preflight.
 func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[auth] /auth-token: %s origin=%q", r.Method, r.Header.Get("Origin"))
+		origin := r.Header.Get("Origin")
+		log.Printf("[auth] /auth-token: method=%s origin=%q open_mode=%v", r.Method, origin, !a.enabled())
 		// Always answer CORS preflight cleanly, regardless of auth state.
 		// This must happen BEFORE any auth check or writeHeader call so
 		// the browser's preflight sees our 204 (not a redirect).
-		if origin := r.Header.Get("Origin"); origin != "" && isLocalOrigin(origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		}
+			setCORSHeaders(w, r)
 		if r.Method == http.MethodOptions || r.Method == http.MethodHead {
 			log.Printf("[auth] /auth-token: preflight → 204")
 			w.WriteHeader(http.StatusNoContent)
@@ -469,11 +622,16 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		log.Printf("[auth] /auth-token: open-mode=%v", !a.enabled())
+		if a.authThrottled(r) {
+			log.Printf("[auth] /auth-token: throttled")
+			http.Error(w, `{"error":"too many requests"}`, http.StatusTooManyRequests)
+			return
+		}
 
 		// Open mode (no --accessToken configured) — set a no-op session
 		// cookie so the speaker-notes page stops redirecting through /login.
 		if !a.enabled() {
+			a.recordAuthSuccess(r)
 			a.setSessionCookie(w, r)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -495,16 +653,25 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 		}
 
 		if provided == "" {
-			http.Error(w, `{"error":"missing token"}`, http.StatusBadRequest)
+			status := http.StatusBadRequest
+			if a.recordAuthFailure(r) {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, `{"error":"missing token"}`, status)
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
-			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			status := http.StatusUnauthorized
+			if a.recordAuthFailure(r) {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, `{"error":"invalid token"}`, status)
 			return
 		}
 
 		// Promote the supplied token into a signed session cookie so
 		// subsequent same-origin navigations authenticate via the cookie.
+		a.recordAuthSuccess(r)
 		a.setSessionCookie(w, r)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -512,19 +679,36 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 	}
 }
 
-// isLocalOrigin echoes the request's Origin header only for localhost /
-// 127.0.0.1 schemes — anything else is left alone so we don't
-// accidentally widen CORS to public origins.
-func isLocalOrigin(origin string) bool {
+// setCORSHeaders mirrors the request Origin and enables credentialed
+// cross-origin requests for every service route.
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	if r == nil {
+		return
+	}
+	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return false
+		return
 	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	if acrh := r.Header.Get("Access-Control-Request-Headers"); acrh != "" {
+		w.Header().Set("Access-Control-Allow-Headers", acrh)
+	} else {
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Origin, X-Requested-With")
 	}
-	host := u.Hostname()
-	scheme := u.Scheme
-	return (scheme == "http" || scheme == "https") &&
-		(host == "localhost" || host == "127.0.0.1")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+	w.Header().Set("Vary", "Origin")
+}
+
+// withCORS adds permissive cross-origin headers to every response and
+// short-circuits OPTIONS preflight requests before auth handlers run.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setCORSHeaders(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

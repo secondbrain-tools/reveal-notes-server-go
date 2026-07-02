@@ -8,7 +8,7 @@
  *      {env.NOTES_SERVER_URL}
  *      {env.REMOTE_NOTES_ACCESS_TOKEN}
  * 2. Plain HTML/demo mode via:
- *      window.REMOTE_NOTES_CLIENT_CONFIG = { serverUrl, token, socketIoPath }
+ *      window.REMOTE_NOTES_CLIENT_CONFIG = { serverUrl, token, socketId, socketIoPath, revealConfig }
  *      window.RemoteNotesClient.init({ ... })
  */
 (function (global) {
@@ -36,6 +36,7 @@
 
   function createClient(config) {
     var reveal = config.reveal || global.Reveal;
+    var revealConfig = config.revealConfig || {};
     if (!reveal) {
       console.warn("RemoteNotesClient: Reveal-compatible API not found");
       return null;
@@ -43,12 +44,17 @@
 
     var token = config.token || "";
     var serverUrl = config.serverUrl;
-    var socketId = Math.random().toString(36).slice(2);
-    var opts = token ? { auth: { token: token }, query: { token: token } } : {};
+    var socketId = config.socketId || Math.random().toString(36).slice(2);
+    var opts = { query: { socketId: socketId } };
+    if (token) {
+      opts.auth = { token: token };
+      opts.query.token = token;
+    }
     opts.withCredentials = true;
 
     var socket = global.io.connect(serverUrl, opts);
-    var notesUrl = serverUrl.replace(/\/+$/, "") + "/notes/" + socketId + (token ? "?token=" + encodeURIComponent(token) : "");
+    var notesUrl =
+      serverUrl.replace(/\/+$/, "") + "/notes/" + encodeURIComponent(socketId);
 
     function emitStatus(type, detail) {
       document.dispatchEvent(
@@ -94,7 +100,11 @@
 
     socket.on("connect", function () {
       console.log("%cSpeaker notes%c " + notesUrl, "font-weight:bold", "");
-      emitStatus("connected", { serverUrl: serverUrl, socketId: socketId, notesUrl: notesUrl });
+      emitStatus("connected", {
+        serverUrl: serverUrl,
+        socketId: socketId,
+        notesUrl: notesUrl,
+      });
       post();
     });
 
@@ -104,11 +114,21 @@
           (err && err.message ? err.message : err) +
           ")",
       );
-      emitStatus("error", { error: err, serverUrl: serverUrl, socketId: socketId, notesUrl: notesUrl });
+      emitStatus("error", {
+        error: err,
+        serverUrl: serverUrl,
+        socketId: socketId,
+        notesUrl: notesUrl,
+      });
     });
 
     socket.on("disconnect", function (reason) {
-      emitStatus("disconnected", { reason: reason, serverUrl: serverUrl, socketId: socketId, notesUrl: notesUrl });
+      emitStatus("disconnected", {
+        reason: reason,
+        serverUrl: serverUrl,
+        socketId: socketId,
+        notesUrl: notesUrl,
+      });
     });
 
     socket.on("new-subscriber", post);
@@ -119,7 +139,7 @@
     bestEffortCookieAuth();
 
     function bindReveal() {
-      var ready = reveal.initialize ? reveal.initialize() : Promise.resolve();
+      var ready = reveal.initialize ? reveal.initialize(revealConfig) : Promise.resolve();
       Promise.resolve(ready).then(function () {
         if (reveal.on) {
           reveal.on("slidechanged", post);
@@ -153,12 +173,18 @@
       var token =
         config.token ||
         injectedConfig.token ||
-        pick("{env.REMOTE_NOTES_ACCESS_TOKEN}", pick("{env.ACCESS_TOKEN}", "")) ||
+        pick(
+          "{env.REMOTE_NOTES_ACCESS_TOKEN}",
+          pick("{env.ACCESS_TOKEN}", ""),
+        ) ||
         "";
       var socketIoPath =
         config.socketIoPath ||
         injectedConfig.socketIoPath ||
         "./libs/runtime/remote-notes-client/socket.io.js";
+
+      var revealConfig =
+        config.revealConfig || injectedConfig.revealConfig || {};
 
       if (!serverUrl) {
         console.warn("RemoteNotesClient: no serverUrl configured");
@@ -174,6 +200,8 @@
                 reveal: config.reveal || injectedConfig.reveal,
                 serverUrl: serverUrl,
                 token: token,
+                socketId: config.socketId || injectedConfig.socketId,
+                revealConfig: revealConfig,
               }),
             );
           } catch (e) {
@@ -186,7 +214,10 @@
 
   global.RemoteNotesClient = api;
 
-  if (document.currentScript && document.currentScript.hasAttribute("data-auto-init")) {
+  if (
+    document.currentScript &&
+    document.currentScript.hasAttribute("data-auto-init")
+  ) {
     api.init().catch(function (err) {
       console.warn("RemoteNotesClient init failed", err);
     });

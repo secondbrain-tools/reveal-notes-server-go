@@ -83,6 +83,17 @@ func (s *SessionStore) Touch(socketId string, state map[string]any) {
 	}
 }
 
+// Get returns a copy of a session by socket ID, or nil if missing.
+func (s *SessionStore) Get(socketId string) *Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if session, ok := s.sessions[socketId]; ok {
+		cp := *session
+		return &cp
+	}
+	return nil
+}
+
 // Prune removes sessions that have not been seen since the given TTL duration.
 func (s *SessionStore) Prune(ttl time.Duration) {
 	cutoff := s.now().Add(-ttl)

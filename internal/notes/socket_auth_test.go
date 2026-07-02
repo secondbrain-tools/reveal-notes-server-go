@@ -104,7 +104,6 @@ func pollHandshake(t *testing.T, ts *testServer, query string, connectBody strin
 	return open.SID, pr2.first(), http.StatusOK
 }
 
-
 // pollReject opens a polling handshake against the test server and
 // returns the HTTP status code. Used to assert that the HTTP edge
 // rejects handshakes before the Socket.IO middleware sees them.
@@ -154,6 +153,108 @@ func TestSocketIOConnectionAcceptsQueryStringToken(t *testing.T) {
 	}
 	if !strings.HasPrefix(first, "40{") {
 		t.Fatalf("expected CONNECT ACK (40{...}), got %q", first)
+	}
+}
+
+func TestSocketIOConnectionAcceptsSessionCookie(t *testing.T) {
+	ts, token := newAuthTestServer(t)
+	client := noRedirectClient(ts)
+
+	loginForm := strings.NewReader("token=" + token + "&returnTo=/notes")
+	loginReq, err := http.NewRequest(http.MethodPost, ts.URL+"/login", loginForm)
+	if err != nil {
+		t.Fatalf("new login request: %v", err)
+	}
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		t.Fatalf("login request: %v", err)
+	}
+	if loginResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %s", loginResp.Status)
+	}
+	if len(loginResp.Cookies()) == 0 {
+		t.Fatal("expected session cookie after login")
+	}
+	cookieHeader := loginResp.Cookies()[0].Name + "=" + loginResp.Cookies()[0].Value
+	loginResp.Body.Close()
+
+	openReq, err := http.NewRequest(http.MethodGet, ts.URL+"/socket.io/?EIO=4&transport=polling&t=1", nil)
+	if err != nil {
+		t.Fatalf("new open request: %v", err)
+	}
+	openReq.Header.Set("Cookie", cookieHeader)
+	openResp, err := client.Do(openReq)
+	if err != nil {
+		t.Fatalf("open request: %v", err)
+	}
+	if openResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected open request 200, got %s", openResp.Status)
+	}
+	openBody, _ := io.ReadAll(openResp.Body)
+	openResp.Body.Close()
+	pr, err := parsePollingPayload(string(openBody))
+	if err != nil {
+		t.Fatalf("parse open response: %v", err)
+	}
+	var open struct {
+		SID string `json:"sid"`
+	}
+	if err := json.Unmarshal([]byte(pr.first()[1:]), &open); err != nil {
+		t.Fatalf("decode open response: %v", err)
+	}
+	if open.SID == "" {
+		t.Fatal("expected socket id in open response")
+	}
+
+	postReq, err := http.NewRequest(http.MethodPost, ts.URL+"/socket.io/?EIO=4&transport=polling&sid="+open.SID+"&t=2", strings.NewReader(connectPacket("")))
+	if err != nil {
+		t.Fatalf("new connect request: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	postReq.Header.Set("Cookie", cookieHeader)
+	postResp, err := client.Do(postReq)
+	if err != nil {
+		t.Fatalf("connect request: %v", err)
+	}
+	if postResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected connect post 200, got %s", postResp.Status)
+	}
+	postResp.Body.Close()
+
+	getReq, err := http.NewRequest(http.MethodGet, ts.URL+"/socket.io/?EIO=4&transport=polling&sid="+open.SID+"&t=3", nil)
+	if err != nil {
+		t.Fatalf("new poll request: %v", err)
+	}
+	getReq.Header.Set("Cookie", cookieHeader)
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		t.Fatalf("poll request: %v", err)
+	}
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected poll request 200, got %s", getResp.Status)
+	}
+	pollBody, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	pr2, err := parsePollingPayload(string(pollBody))
+	if err != nil {
+		t.Fatalf("parse poll response: %v", err)
+	}
+	if !strings.HasPrefix(pr2.first(), "40{") {
+		t.Fatalf("expected CONNECT ACK (40{...}), got %q", pr2.first())
+	}
+}
+
+func TestSocketIOConnectionThrottlesRejectedHandshakes(t *testing.T) {
+	ts := newAuthTestServerWithToken(t, "secret")
+
+	for i := 0; i < authThrottleFailureLimit; i++ {
+		if code := pollReject(t, ts, "&token=nope"); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d", i+1, code)
+		}
+	}
+	if code := pollReject(t, ts, "&token=nope"); code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated socket failures, got %d", code)
 	}
 }
 
@@ -212,6 +313,36 @@ func TestSocketIOConnectionNoAuthWhenTokenEmpty(t *testing.T) {
 	}
 	if !strings.HasPrefix(first, "40{") {
 		t.Fatalf("expected CONNECT ACK (40{...}), got %q", first)
+	}
+}
+
+func TestSocketIOConnectionAddsSession(t *testing.T) {
+	ts := newAuthTestServerWithToken(t, "")
+
+	_, _, code := pollHandshake(t, ts, "&socketId=client-123", connectPacket(""))
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+
+	session := ts.server.Store.Get("client-123")
+	if session == nil {
+		t.Fatal("expected session to be stored under the handshake socketId")
+	}
+	if session.SocketId != "client-123" {
+		t.Fatalf("expected session id client-123, got %q", session.SocketId)
+	}
+}
+
+func TestSocketIOConnectionTouchesHandshakeSocketIDWithAuth(t *testing.T) {
+	ts := newAuthTestServerWithToken(t, "secret")
+
+	_, _, code := pollHandshake(t, ts, "&token=secret&socketId=client-abc", connectPacket("secret"))
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+
+	if session := ts.server.Store.Get("client-abc"); session == nil {
+		t.Fatal("expected authenticated socket session to be stored")
 	}
 }
 

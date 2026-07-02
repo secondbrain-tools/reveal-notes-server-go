@@ -41,8 +41,12 @@ The demo will:
   window.REMOTE_NOTES_CLIENT_CONFIG = {
     serverUrl: "http://127.0.0.1:1947",
     token: "secret-token",
+    socketId: "demo",
     socketIoPath: "./presentation-libs/socket.io.js",
     reveal: window.Reveal,
+    revealConfig: {
+      plugins: [RevealHighlight, RevealNotes],
+    },
   };
 </script>
 <script src="./remote-notes-client.js"></script>
@@ -60,6 +64,16 @@ If the server is started with `--access-token`, set the same value in one of the
 
 If the token is missing while the server requires one, the browser cannot join the session.
 
+### Stable presentation mapping
+
+Set `socketId` to the same slug as the uploaded presentation name when you want the speaker view preview to open that uploaded presentation automatically.
+
+Example:
+- upload `demo.html` as presentation `demo`
+- set `socketId: "demo"`
+- the notes URL becomes `/notes/demo`
+- the speaker view then loads `/p/demo/` as its preview iframe
+
 ### 2. Manifest/template mode
 
 Use the placeholders exposed by the client script:
@@ -74,8 +88,12 @@ Example:
   window.REMOTE_NOTES_CLIENT_CONFIG = {
     serverUrl: "{env.NOTES_SERVER_URL}",
     token: "{env.REMOTE_NOTES_ACCESS_TOKEN}",
+    socketId: "demo",
     socketIoPath: "./presentation-libs/socket.io.js",
     reveal: window.Reveal,
+    revealConfig: {
+      plugins: [RevealHighlight, RevealNotes],
+    },
   };
 </script>
 <script src="./remote-notes-client.js"></script>

@@ -25,6 +25,10 @@ func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 
 	tmpDir := t.TempDir()
+	uploadsDir := filepath.Join(t.TempDir(), "uploads")
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	// Create a test presentation index file
 	indexContent := "<html><body>Test Presentation</body></html>"
 	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte(indexContent), 0644)
@@ -37,6 +41,7 @@ func newTestServer(t *testing.T) *testServer {
 		Port:              0, // not used with httptest
 		PresentationDir:   tmpDir,
 		PresentationIndex: "/index.html",
+		PresentationsDir:  uploadsDir,
 		ActiveTtlMs:       7200000,
 	}
 
@@ -66,6 +71,64 @@ func TestHandleHealth(t *testing.T) {
 	}
 	if result["status"] != "ok" {
 		t.Errorf("expected status ok, got %s", result["status"])
+	}
+}
+
+func TestHandleHealthRequiresAuthWhenEnabled(t *testing.T) {
+	token := "secret-token"
+	ts := newAuthTestServerWithToken(t, token)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp := ts.Do(req)
+	if resp.Code != http.StatusFound {
+		t.Fatalf("expected redirect to login, got %d", resp.Code)
+	}
+	if loc := resp.Header().Get("Location"); !strings.HasPrefix(loc, "/login?returnTo=%2Fhealth") {
+		t.Fatalf("unexpected health redirect location: %q", loc)
+	}
+
+	bearerReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	bearerReq.Header.Set("Authorization", "Bearer "+token)
+	bearerResp := ts.Do(bearerReq)
+	if bearerResp.Code != http.StatusOK {
+		t.Fatalf("expected bearer health 200, got %d", bearerResp.Code)
+	}
+	body, _ := io.ReadAll(bearerResp.Body)
+	var result map[string]string
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["status"] != "ok" {
+		t.Fatalf("expected status ok, got %s", result["status"])
+	}
+
+	loginReqBody := strings.NewReader("token=" + token + "&returnTo=/health")
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", loginReqBody)
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResp := ts.Do(loginReq)
+	if loginResp.Code != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %d", loginResp.Code)
+	}
+	if loc := loginResp.Header().Get("Location"); loc != "/health" {
+		t.Fatalf("expected clean /health login redirect, got %q", loc)
+	}
+	cookies := loginResp.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected health login to set a session cookie")
+	}
+
+	cookieReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	cookieReq.Header.Set("Cookie", cookies[0].Name+"="+cookies[0].Value)
+	cookieResp := ts.Do(cookieReq)
+	if cookieResp.Code != http.StatusOK {
+		t.Fatalf("expected cookie health 200, got %d", cookieResp.Code)
+	}
+	body, _ = io.ReadAll(cookieResp.Body)
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["status"] != "ok" {
+		t.Fatalf("expected cookie health status ok, got %s", result["status"])
 	}
 }
 
@@ -184,7 +247,7 @@ func TestHandleDashboard(t *testing.T) {
 	// Add a session
 	ts.server.Store.Touch("test-socket-id", nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	req := httptest.NewRequest(http.MethodGet, "/notes?filter=all", nil)
 	resp := ts.Do(req)
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.Code)
@@ -196,10 +259,80 @@ func TestHandleDashboard(t *testing.T) {
 		t.Errorf("expected page title, got: %s", bodyStr)
 	}
 	if !strings.Contains(bodyStr, "test-socket-id") {
-		t.Errorf("expected socket ID in dashboard, got: %s", bodyStr)
+		t.Errorf("expected session title, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "status-badge status-missing\">Upload missing</span>") {
+		t.Errorf("expected upload missing badge, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Session ID: test-socket-id") {
+		t.Errorf("expected Session ID label, got: %s", bodyStr)
 	}
 	if !strings.Contains(bodyStr, "Open Speaker View") {
 		t.Errorf("expected Open Speaker View link, got: %s", bodyStr)
+	}
+
+}
+
+func TestHandleDashboardShowsPresentationNameWhenUploaded(t *testing.T) {
+	ts := newTestServer(t)
+	if err := os.MkdirAll(filepath.Join(ts.server.Config.PresentationsDir, "demo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ts.server.Store.Touch("demo", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/notes?filter=all", nil)
+	resp := ts.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "<h2 class=\"title\">Presentation: demo</h2>") {
+		t.Fatalf("expected presentation name in title, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "status-badge status-present\">Uploaded</span>") {
+		t.Fatalf("expected uploaded badge, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Session ID: demo") {
+		t.Fatalf("expected session id below title, got: %s", bodyStr)
+	}
+}
+
+func TestHandleDashboardFiltersViewerSessions(t *testing.T) {
+	ts := newTestServer(t)
+	ts.server.Store.Touch("viewer-1", nil)
+	ts.server.Store.Touch("demo", map[string]any{
+		"state": map[string]any{"indexh": float64(1)},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/notes?filter=presentations", nil)
+	resp := ts.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Presentation: demo") {
+		t.Fatalf("expected presentation session in filtered dashboard, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "viewer-1") {
+		t.Fatalf("expected viewer session to be filtered out, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "chip active\" href=\"/notes?filter=presentations\"") {
+		t.Fatalf("expected presentations filter chip to be active, got: %s", bodyStr)
+	}
+}
+
+func TestHandleDashboardFiltersPresentationSessions(t *testing.T) {
+	ts := newTestServer(t)
+	ts.server.Store.Touch("viewer-1", nil)
+	ts.server.Store.Touch("demo", map[string]any{
+		"state": map[string]any{"indexh": float64(1)},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/notes?filter=viewers", nil)
+	resp := ts.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "Presentation: demo") {
+		t.Fatalf("expected presentation session to be filtered out, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "viewer-1") {
+		t.Fatalf("expected viewer session in filtered dashboard, got: %s", bodyStr)
 	}
 }
 

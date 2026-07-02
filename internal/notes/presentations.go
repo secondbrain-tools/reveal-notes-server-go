@@ -19,17 +19,28 @@ const presentationMetadataFilename = ".presentation.json"
 
 // requireAccessToken returns a middleware that checks the Authorization header.
 // If the token is empty, the check is skipped (no auth required).
-func requireAccessToken(token string, next http.HandlerFunc) http.HandlerFunc {
-	if token == "" {
+func requireAccessToken(auth *browserAuth, next http.HandlerFunc) http.HandlerFunc {
+	if auth == nil || !auth.enabled() {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !hasBearerToken(r, token) {
+		if auth.authThrottled(r) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"too many requests"}`))
+			return
+		}
+		if !hasBearerToken(r, auth.token) {
+			status := http.StatusUnauthorized
+			if auth.recordAuthFailure(r) {
+				status = http.StatusTooManyRequests
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
 			w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
+		auth.recordAuthSuccess(r)
 		next(w, r)
 	}
 }

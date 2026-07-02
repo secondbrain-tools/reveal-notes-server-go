@@ -16,7 +16,7 @@ import (
 )
 
 func TestRequireAccessToken(t *testing.T) {
-	handler := requireAccessToken("secret", func(w http.ResponseWriter, r *http.Request) {
+	handler := requireAccessToken(newBrowserAuth("secret"), func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -38,6 +38,34 @@ func TestRequireAccessToken(t *testing.T) {
 
 	if resp.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", resp.Code)
+	}
+}
+
+func TestRequireAccessTokenThrottlesFailures(t *testing.T) {
+	auth := newBrowserAuth("secret")
+	handler := requireAccessToken(auth, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	for i := 0; i < authThrottleFailureLimit; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/presentations", nil)
+		req.Header.Set("Authorization", "Bearer wrong")
+		resp := httptest.NewRecorder()
+		handler(resp, req)
+		if resp.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d", i+1, resp.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/presentations", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	resp := httptest.NewRecorder()
+	handler(resp, req)
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated failures, got %d", resp.Code)
+	}
+	if body := strings.TrimSpace(resp.Body.String()); body != `{"error":"unauthorized"}` {
+		t.Fatalf("unexpected throttled body: %s", body)
 	}
 }
 
@@ -500,7 +528,7 @@ func TestHandleGetPresentationHashRequiresAuth(t *testing.T) {
 	presStore.Add("auth-hash", bytes.NewReader(zipData))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken("secret-token", HandleGetPresentationHash(presStore)))
+	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken(newBrowserAuth("secret-token"), HandleGetPresentationHash(presStore)))
 
 	// Without auth
 	req := httptest.NewRequest(http.MethodGet, "/api/presentations/auth-hash/hash", nil)

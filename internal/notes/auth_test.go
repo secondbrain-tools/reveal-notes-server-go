@@ -3,6 +3,7 @@ package notes
 import (
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -112,12 +113,32 @@ func TestBrowserAuthFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected login redirect, got %s", resp.Status)
 	}
+	if loc := resp.Header.Get("Location"); loc != "/notes" {
+		t.Fatalf("expected clean login redirect to /notes, got %q", loc)
+	}
 	cookies := resp.Cookies()
 	if len(cookies) == 0 || cookies[0].Name != browserAuthCookieName {
 		t.Fatalf("expected auth cookie, got %#v", cookies)
 	}
 	if !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("unexpected cookie flags: %#v", cookies[0])
+	}
+	resp.Body.Close()
+
+	// A successful login must also keep later /login redirects clean.
+	req, err = http.NewRequest(http.MethodGet, ts.URL+"/login?returnTo="+url.QueryEscape("/notes?token=secret"), nil)
+	if err != nil {
+		t.Fatalf("new login GET request: %v", err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("login GET request: %v", err)
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected authenticated login redirect, got %s", resp.Status)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/notes" {
+		t.Fatalf("expected clean authenticated redirect to /notes, got %q", loc)
 	}
 	resp.Body.Close()
 
@@ -204,12 +225,51 @@ func TestBrowserAuthSetsSecureCookieOnHTTPS(t *testing.T) {
 	}
 }
 
+func TestLoginAndAuthTokenShareThrottle(t *testing.T) {
+	auth := newBrowserAuth("secret")
+	loginHandler := auth.loginHandler()
+	tokenHandler := auth.tokenExchangeHandler()
+
+	for i := 0; i < authThrottleFailureLimit; i++ {
+		loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong&returnTo=/notes"))
+		loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		loginResp := httptest.NewRecorder()
+		loginHandler(loginResp, loginReq)
+		if loginResp.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected login 401, got %d", i+1, loginResp.Code)
+		}
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong&returnTo=/notes"))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResp := httptest.NewRecorder()
+	loginHandler(loginResp, loginReq)
+	if loginResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected throttled login 429, got %d", loginResp.Code)
+	}
+
+	tokenReq := httptest.NewRequest(http.MethodPost, "/auth-token", strings.NewReader(`{"token":"wrong"}`))
+	tokenReq.Header.Set("Content-Type", "application/json")
+	tokenResp := httptest.NewRecorder()
+	tokenHandler(tokenResp, tokenReq)
+	if tokenResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected auth-token throttling, got %d", tokenResp.Code)
+	}
+	if body, _ := io.ReadAll(tokenResp.Body); !strings.Contains(string(body), "too many requests") {
+		t.Fatalf("expected throttled body, got %s", string(body))
+	}
+}
+
 // newAuthTestServerWithToken creates a test server with a configured access
 // token. The presentation index file is added so the mux handles the root
 // route. It reuses the shared testServer type from server_test.go.
 func newAuthTestServerWithToken(t *testing.T, token string) *testServer {
 	t.Helper()
 	tmpDir := t.TempDir()
+	uploadsDir := filepath.Join(t.TempDir(), "uploads")
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html></html>"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +278,7 @@ func newAuthTestServerWithToken(t *testing.T, token string) *testServer {
 		Port:              0,
 		PresentationDir:   tmpDir,
 		PresentationIndex: "/index.html",
+		PresentationsDir:  uploadsDir,
 		ActiveTtlMs:       7200000,
 		AccessToken:       token,
 	}
@@ -248,7 +309,6 @@ func TestHasQueryToken(t *testing.T) {
 		})
 	}
 }
-
 
 func TestValidateHandshakeToken(t *testing.T) {
 	if !validateHandshakeToken("", "anything") {
@@ -308,6 +368,56 @@ func TestAuthorizeHandshake(t *testing.T) {
 	// as the canonical channel).
 	if err := authorizeHandshake("secret", wrong, q); err != nil {
 		t.Fatalf("query.token alone should authorize (auth payload is optional), got %v", err)
+	}
+}
+
+func TestAuthLogsAreRedacted(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer log.SetOutput(oldOutput)
+	defer log.SetFlags(oldFlags)
+
+	acceptedQ := utils.NewParameterBag(map[string][]string{"token": {"secret"}})
+	if err := authorizeHandshake("secret", map[string]any{"auth": map[string]any{"token": "secret"}}, acceptedQ); err != nil {
+		t.Fatalf("authorizeHandshake accepted path failed: %v", err)
+	}
+
+	rejectedQ := utils.NewParameterBag(map[string][]string{"token": {"nope"}})
+	if err := authorizeHandshake("secret", map[string]any{"auth": map[string]any{"token": "nope"}}, rejectedQ); err == nil {
+		t.Fatal("expected authorizeHandshake rejection")
+	}
+
+	auth := newBrowserAuth("secret")
+	acceptedReq := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&token=secret", nil)
+	acceptedReq.Header.Set("Authorization", "Bearer secret")
+	acceptedReq.Header.Set("Cookie", browserAuthCookieName+"=secret")
+	wrap := auth.wrapSocket(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	wrap(httptest.NewRecorder(), acceptedReq)
+
+	rejectedReq := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling&token=nope", nil)
+	wrap(httptest.NewRecorder(), rejectedReq)
+
+	acceptedTokenReq := httptest.NewRequest(http.MethodPost, "/auth-token", strings.NewReader(`{"token":"secret"}`))
+	acceptedTokenReq.Header.Set("Content-Type", "application/json")
+	auth.tokenExchangeHandler()(httptest.NewRecorder(), acceptedTokenReq)
+
+	rejectedTokenReq := httptest.NewRequest(http.MethodPost, "/auth-token", strings.NewReader(`{"token":"nope"}`))
+	rejectedTokenReq.Header.Set("Content-Type", "application/json")
+	auth.tokenExchangeHandler()(httptest.NewRecorder(), rejectedTokenReq)
+
+	logs := buf.String()
+	for _, forbidden := range []string{"secret", "Bearer", "Authorization", "Cookie"} {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("log output leaked %q: %s", forbidden, logs)
+		}
+	}
+	for _, wanted := range []string{"result=accepted", "result=rejected", "query_token=true"} {
+		if !strings.Contains(logs, wanted) {
+			t.Fatalf("expected redaction-safe summary %q in logs: %s", wanted, logs)
+		}
 	}
 }
 

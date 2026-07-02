@@ -11,6 +11,7 @@ import (
 	"time"
 
 	etypes "github.com/zishang520/engine.io/types"
+	"github.com/zishang520/engine.io/utils"
 	"github.com/zishang520/socket.io/socket"
 )
 
@@ -99,21 +100,44 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.AccessToken != "" {
 		sio.Use(func(so *socket.Socket, next func(*socket.ExtendedError)) {
 			hs := so.Handshake()
+			req := so.Request()
+			var httpReq *http.Request
+			if req != nil {
+				httpReq = req.Request()
+			}
 			var authPayload map[string]any
 			if hs != nil {
-				authPayload = map[string]any{
-					"auth": hs.Auth,
-				}
+				authPayload = map[string]any{"auth": hs.Auth}
 			}
-			if err := authorizeHandshake(cfg.AccessToken, authPayload, hs.Query); err == nil {
+			path := ""
+			if req != nil {
+				path = req.Path()
+			}
+			if httpReq != nil && auth.authThrottled(httpReq) {
+				log.Printf("[auth] sio.Use: method=%s path=%s result=throttled", httpReq.Method, path)
+				next(socket.NewExtendedError("too many requests", nil))
+				return
+			}
+			if err := authorizeHandshake(cfg.AccessToken, authPayload, func() *utils.ParameterBag {
+				if hs == nil {
+					return nil
+				}
+				return hs.Query
+			}()); err == nil {
+				if httpReq != nil {
+					auth.recordAuthSuccess(httpReq)
+				}
 				log.Printf("[auth] sio.Use: accepted via query/auth token")
 				next(nil)
 				return
 			}
 			// Fallback 2: cookie header (chromium WebSocket upgrade)
-			if headers := so.Request().Headers(); headers != nil {
-				if cookieHeader := headers.Peek("Cookie"); cookieHeader != "" {
-					if authenticatedViaCookieHeader(cookieHeader, cfg.AccessToken) {
+			if req != nil {
+				if headers := req.Headers(); headers != nil {
+					if cookieHeader := headers.Peek("Cookie"); cookieHeader != "" && authenticatedViaCookieHeader(cookieHeader, cfg.AccessToken) {
+						if httpReq != nil {
+							auth.recordAuthSuccess(httpReq)
+						}
 						log.Printf("[auth] sio.Use: accepted via Cookie header")
 						next(nil)
 						return
@@ -124,10 +148,18 @@ func NewServer(cfg ServerConfig) *Server {
 			// (Firefox belt-and-braces: JS forwards the cookie it already has)
 			if hs != nil && hs.Query != nil {
 				if v, _ := hs.Query.Get("token"); v != "" && validSessionCookieValue(v, cfg.AccessToken) {
+					if httpReq != nil {
+						auth.recordAuthSuccess(httpReq)
+					}
 					log.Printf("[auth] sio.Use: accepted via query.token=cookie value")
 					next(nil)
 					return
 				}
+			}
+			if httpReq != nil && auth.recordAuthFailure(httpReq) {
+				log.Printf("[auth] sio.Use: rejected (throttled)")
+				next(socket.NewExtendedError("too many requests", nil))
+				return
 			}
 			log.Printf("[auth] sio.Use: REJECTED handshake")
 			next(socket.NewExtendedError("unauthorized", nil))
@@ -138,6 +170,13 @@ func NewServer(cfg ServerConfig) *Server {
 		so := clients[0].(*socket.Socket)
 		srv.connectedClients.Add(1)
 		srv.cancelIdleTimer()
+		sessionID := string(so.Id())
+		if hs := so.Handshake(); hs != nil && hs.Query != nil {
+			if v, _ := hs.Query.Get("socketId"); v != "" {
+				sessionID = v
+			}
+		}
+		store.Touch(sessionID, nil)
 
 		so.On("disconnect", func(args ...any) {
 			if srv.connectedClients.Add(-1) == 0 {
@@ -184,17 +223,17 @@ func NewServer(cfg ServerConfig) *Server {
 	mux := http.NewServeMux()
 
 	// API endpoints for presentation upload/management (auth-protected)
-	mux.HandleFunc("POST /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleUploadPresentation(presStore)))
-	mux.HandleFunc("PUT /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleUploadPresentation(presStore)))
-	mux.HandleFunc("GET /api/presentations", requireAccessToken(cfg.AccessToken, HandleListPresentations(presStore)))
-	mux.HandleFunc("DELETE /api/presentations/{name}", requireAccessToken(cfg.AccessToken, HandleDeletePresentation(presStore)))
-	mux.HandleFunc("GET /api/presentations/{name}/hash", requireAccessToken(cfg.AccessToken, HandleGetPresentationHash(presStore)))
+	mux.Handle("POST /api/presentations/{name}", withCORS(requireAccessToken(auth, HandleUploadPresentation(presStore))))
+	mux.Handle("PUT /api/presentations/{name}", withCORS(requireAccessToken(auth, HandleUploadPresentation(presStore))))
+	mux.Handle("GET /api/presentations", withCORS(requireAccessToken(auth, HandleListPresentations(presStore))))
+	mux.Handle("DELETE /api/presentations/{name}", withCORS(requireAccessToken(auth, HandleDeletePresentation(presStore))))
+	mux.Handle("GET /api/presentations/{name}/hash", withCORS(requireAccessToken(auth, HandleGetPresentationHash(presStore))))
 
 	// Browser auth entry points.
-	mux.HandleFunc("GET /login", auth.loginHandler())
-	mux.HandleFunc("POST /login", auth.loginHandler())
-	mux.HandleFunc("GET /logout", auth.logoutHandler())
-	mux.HandleFunc("POST /logout", auth.logoutHandler())
+	mux.Handle("GET /login", withCORS(auth.loginHandler()))
+	mux.Handle("POST /login", withCORS(auth.loginHandler()))
+	mux.Handle("GET /logout", withCORS(auth.logoutHandler()))
+	mux.Handle("POST /logout", withCORS(auth.logoutHandler()))
 
 	// Cross-origin cookie handoff: the publisher's presentation page POSTs
 	// the token here once and we promote it to a signed session cookie on
@@ -202,43 +241,42 @@ func NewServer(cfg ServerConfig) *Server {
 	// the same browser send the cookie automatically. Mounted outside
 	// auth.wrapPage so OPTIONS preflight bypasses the /login redirect —
 	// the browser rejects any 3xx on a preflight.
-	mux.HandleFunc("/auth-token", auth.tokenExchangeHandler())
+	mux.Handle("/auth-token", withCORS(auth.tokenExchangeHandler()))
 
 	// Serve uploaded presentations at /p/{name}/...
-	mux.HandleFunc("/p/{name}/", auth.wrapPage(HandleServePresentation(cfg.PresentationsDir)))
+	mux.Handle("/p/{name}/", withCORS(auth.wrapPage(HandleServePresentation(cfg.PresentationsDir))))
 
 	// Redirect /p/{name} to /p/{name}/
-	mux.HandleFunc("GET /p/{name}", auth.wrapPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /p/{name}", withCORS(auth.wrapPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		http.Redirect(w, r, "/p/"+name+"/", http.StatusMovedPermanently)
-	})))
+	}))))
 
 	// Socket.IO handler
 	// Serve the embedded Socket.IO client library
-	mux.HandleFunc("GET /socket.io/socket.io.js", auth.wrapPage(http.HandlerFunc(HandleSocketIOClient)))
-	mux.Handle("/socket.io/", auth.wrapSocket(sio.ServeHandler(nil)))
+	mux.Handle("GET /socket.io/socket.io.js", withCORS(auth.wrapPage(http.HandlerFunc(HandleSocketIOClient))))
+	mux.Handle("/socket.io/", withCORS(auth.wrapSocket(sio.ServeHandler(nil))))
 
 	// Health check
-	mux.HandleFunc("/health", HandleHealth)
-
+	mux.Handle("/health", withCORS(auth.wrapPage(http.HandlerFunc(HandleHealth))))
 	// Sessions JSON endpoint
-	mux.HandleFunc("GET /notes/sessions", auth.wrapPage(HandleSessionsJSON(store, activeTtl, int64(cfg.ActiveTtlMs))))
+	mux.Handle("GET /notes/sessions", withCORS(auth.wrapPage(HandleSessionsJSON(store, activeTtl, int64(cfg.ActiveTtlMs)))))
 
 	// Dashboard and speaker view
-	dashboardHandler := auth.wrapPage(HandleDashboard(store, activeTtl))
-	mux.HandleFunc("GET /notes", dashboardHandler)
-	mux.HandleFunc("GET /notes/", dashboardHandler)
-	mux.HandleFunc("GET /notes/{socketId}", auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir, cfg.AccessToken)))
+	dashboardHandler := auth.wrapPage(HandleDashboard(store, activeTtl, cfg.PresentationsDir))
+	mux.Handle("GET /notes", withCORS(dashboardHandler))
+	mux.Handle("GET /notes/", withCORS(dashboardHandler))
+	mux.Handle("GET /notes/{socketId}", withCORS(auth.wrapPage(HandleSpeakerView(store, cfg.PresentationsDir, cfg.AccessToken))))
 
 	// Root URL → dashboard (active sessions with links to speaker views).
 	// The presentation file server below still catches every other path,
 	// so /p/{NAME}/ etc. continue to work. `?qr=true` and other unknown
 	// query params on / are ignored — the dashboard renders regardless.
-	mux.HandleFunc("GET /{$}", auth.wrapPage(HandleDashboard(store, activeTtl)))
+	mux.Handle("GET /{$}", withCORS(auth.wrapPage(HandleDashboard(store, activeTtl, cfg.PresentationsDir))))
 
 	// Static file serving for uploaded presentations and any other files.
 	presentationFS := http.FileServer(http.Dir(cfg.PresentationDir))
-	mux.Handle("/", auth.wrapPage(presentationFS))
+	mux.Handle("/", withCORS(auth.wrapPage(presentationFS)))
 
 	srv.Mux = mux
 

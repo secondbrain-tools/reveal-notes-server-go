@@ -6,7 +6,9 @@ Compared to the original project, this repo adds:
 
 - presentation upload from a local HTML file + directory or files from an upload list
 - automatic removal of uploaded presentations after a TTL
-- optional access-token based security for browser routes and the upload/list/delete API
+- optional access-token based security
+
+The current main usecase is, to use a second device for showing the notes of a presentation.
 
 ## Overview
 
@@ -24,6 +26,35 @@ By default it stores uploaded presentations in `./presentations` and creates tha
 Packages a local presentation folder into a zip archive, renames the selected HTML file to `index.html`, applies ignore rules, and uploads it to the server.
 
 It can infer missing parameters from `--html-file`.
+
+## Reveal.js integration
+
+If your presentation already uses Reveal.js, you can attach the remote notes client to the existing deck instead of using the local demo.
+
+```html
+<script>
+window.REMOTE_NOTES_CLIENT_CONFIG = {
+  serverUrl: "http://localhost:1947",
+  socketId: "my-talk",
+  socketIoPath: "./presentation-libs/socket.io.js",
+  reveal: window.Reveal,
+  revealConfig: {
+    plugins: [RevealHighlight, RevealNotes],
+  },
+};
+</script>
+<script src="./remote-notes-client.js"></script>
+<script>window.RemoteNotesClient.init();</script>
+```
+
+A few tips:
+
+- `reveal` can point to your existing `window.Reveal` instance.
+- `revealConfig` is passed to `Reveal.initialize()`; include `RevealNotes` and any other plugins your deck needs.
+- Set `socketId` to the uploaded presentation name if you want `/notes/{socketId}` to open the matching uploaded slide deck automatically.
+- If the server runs with `--access-token`, also set `token` in the config.
+
+See `notes-client/README.md` and `notes-client/demo.html` for a full browser-side example.
 
 ## Getting started
 
@@ -64,7 +95,7 @@ It can infer missing parameters from `--html-file`.
 | `--name` | `-n` | inferred | Presentation slug/name |
 | `--source-dir` | `-s` | inferred | Folder to package into the archive |
 | `--filelist` | `-l` | inferred | Optional filelist file to include only selected paths |
-| `--access-token` | `-k` | (empty) | Optional bearer token for protected servers |
+| `--access-token` | `-k` | (empty) | Optional bearer token for protected servers; also enables built-in auth throttling and protected `/health` |
 | `--ignore` | `-i` | empty | Repeatable gitignore-style ignore pattern |
 
 ### Upload inference
@@ -90,8 +121,11 @@ The CLI prints the resolved values at startup so you can verify the inference be
 If `--access-token` is set on the server:
 
 - browser routes require a login once per browser session
+- successful `/login` redirects return the clean target URL; the access token is not appended to the redirect
 - API write/list/delete/hash endpoints require `Authorization: Bearer <token>`
-- `/health` remains open
+- `/health` is protected by the same browser/token auth flow
+- the publisher-generated speaker bootstrap link still uses a one-time `?token=...` handoff for the first speaker open
+- failed auth attempts are throttled with built-in fixed limits
 
 ## API quick reference
 

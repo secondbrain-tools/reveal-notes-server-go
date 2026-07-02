@@ -22,19 +22,22 @@ type sessionsResponse struct {
 type DashboardData struct {
 	ActiveTtlMinutes int64
 	SessionCards     []sessionCard
+	CurrentFilter    string
 }
 
 type sessionCard struct {
-	SocketId      string
-	SocketIdSafe  string
-	CreatedAtIso  string
-	CreatedAtAge  string
-	LastSeenAtIso string
-	LastSeenAtAge string
-	IndexH        string
-	IndexV        string
-	IndexF        string
-	EncodedID     string
+	Title                   string
+	SocketIdSafe            string
+	PresentationStatus      string
+	PresentationStatusClass string
+	CreatedAtIso            string
+	CreatedAtAge            string
+	LastSeenAtIso           string
+	LastSeenAtAge           string
+	IndexH                  string
+	IndexV                  string
+	IndexF                  string
+	EncodedID               string
 }
 
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
@@ -91,6 +94,17 @@ const dashboardHTML = `<!doctype html>
       background: #f7fbff;
       font-size: 0.9rem;
     }
+    .filter-row {
+      margin-top: 0.7rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .chip.active {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
     .grid {
       display: grid;
       gap: 0.75rem;
@@ -105,10 +119,42 @@ const dashboardHTML = `<!doctype html>
       display: grid;
       gap: 0.55rem;
     }
-    .id {
+    .title-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .title {
       margin: 0;
       font-size: 1rem;
+      font-weight: 700;
       overflow-wrap: anywhere;
+    }
+    .id {
+      margin: -0.15rem 0 0;
+      font-size: 0.84rem;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 0.18rem 0.55rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+    .status-missing {
+      color: #9a3412;
+      background: #ffedd5;
+      border-color: #fdba74;
+    }
+    .status-present {
+      color: #166534;
+      background: #dcfce7;
+      border-color: #86efac;
     }
     .meta {
       display: grid;
@@ -156,12 +202,21 @@ const dashboardHTML = `<!doctype html>
     <header class="top">
       <h1>Active Notes Sessions</h1>
       <p class="sub">Sessions auto-expire after {{.ActiveTtlMinutes}} minutes of inactivity.</p>
+      <div class="filter-row">
+        <a class="chip {{if eq .CurrentFilter "presentations"}}active{{end}}" href="/notes?filter=presentations">Presentations</a>
+        <a class="chip {{if eq .CurrentFilter "all"}}active{{end}}" href="/notes?filter=all">All</a>
+        <a class="chip {{if eq .CurrentFilter "viewers"}}active{{end}}" href="/notes?filter=viewers">Viewers</a>
+      </div>
     </header>
     <section class="grid">
       {{if .SessionCards}}
         {{range .SessionCards}}
         <article class="card">
-          <h2 class="id">{{.SocketIdSafe}}</h2>
+          <div class="title-row">
+            <h2 class="title">Presentation: {{.Title}}</h2>
+            <span class="status-badge {{.PresentationStatusClass}}">{{.PresentationStatus}}</span>
+          </div>
+          <p class="id">Session ID: {{.SocketIdSafe}}</p>
           <div class="meta"><span>Created</span><time datetime="{{.CreatedAtIso}}">{{.CreatedAtIso}}</time><span class="age">{{.CreatedAtAge}}</span></div>
           <div class="meta"><span>Last seen</span><time datetime="{{.LastSeenAtIso}}">{{.LastSeenAtIso}}</time><span class="age">{{.LastSeenAtAge}}</span></div>
           <div class="meta"><span>Slide h/v/f</span><code>{{.IndexH}} / {{.IndexV}} / {{.IndexF}}</code><span></span></div>
@@ -256,8 +311,25 @@ func HandleSessionsJSON(store *SessionStore, activeTtl time.Duration, activeTtlM
 	}
 }
 
+func sessionHasUploadedPresentation(presentationsDir, socketID string) bool {
+	if socketID == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(presentationsDir, socketID)); err == nil {
+		return true
+	}
+	return false
+}
+
+func sessionIsPresentation(s *Session, presentationsDir string) bool {
+	if s == nil {
+		return false
+	}
+	return s.LastIndex != nil || sessionHasUploadedPresentation(presentationsDir, s.SocketId)
+}
+
 // HandleDashboard responds with the HTML dashboard.
-func HandleDashboard(store *SessionStore, activeTtl time.Duration) http.HandlerFunc {
+func HandleDashboard(store *SessionStore, activeTtl time.Duration, presentationsDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -265,20 +337,43 @@ func HandleDashboard(store *SessionStore, activeTtl time.Duration) http.HandlerF
 		}
 		store.Prune(activeTtl)
 		sessions := store.List()
+		filter := r.URL.Query().Get("filter")
+		if filter == "" {
+			filter = "presentations"
+		}
+		if filter != "all" && filter != "presentations" && filter != "viewers" {
+			filter = "presentations"
+		}
 
 		cards := make([]sessionCard, 0, len(sessions))
 		for _, s := range sessions {
+			hasUpload := sessionHasUploadedPresentation(presentationsDir, s.SocketId)
+			isPresentation := s.LastIndex != nil || hasUpload
+			if filter == "presentations" && !isPresentation {
+				continue
+			}
+			if filter == "viewers" && isPresentation {
+				continue
+			}
+			presentationStatus := "Upload missing"
+			presentationStatusClass := "status-missing"
+			if hasUpload {
+				presentationStatus = "Uploaded"
+				presentationStatusClass = "status-present"
+			}
 			card := sessionCard{
-				SocketId:      s.SocketId,
-				SocketIdSafe:  htmlEscape(s.SocketId),
-				CreatedAtIso:  formatIso(s.CreatedAt),
-				CreatedAtAge:  formatAge(s.CreatedAt),
-				LastSeenAtIso: formatIso(s.LastSeenAt),
-				LastSeenAtAge: formatAge(s.LastSeenAt),
-				IndexH:        intOrDash(nil),
-				IndexV:        intOrDash(nil),
-				IndexF:        intOrDash(nil),
-				EncodedID:     s.SocketId,
+				Title:                   s.SocketId,
+				SocketIdSafe:            htmlEscape(s.SocketId),
+				PresentationStatus:      presentationStatus,
+				PresentationStatusClass: presentationStatusClass,
+				CreatedAtIso:            formatIso(s.CreatedAt),
+				CreatedAtAge:            formatAge(s.CreatedAt),
+				LastSeenAtIso:           formatIso(s.LastSeenAt),
+				LastSeenAtAge:           formatAge(s.LastSeenAt),
+				IndexH:                  intOrDash(nil),
+				IndexV:                  intOrDash(nil),
+				IndexF:                  intOrDash(nil),
+				EncodedID:               s.SocketId,
 			}
 			if s.LastIndex != nil {
 				card.IndexH = intOrDash(s.LastIndex.H)
@@ -291,6 +386,7 @@ func HandleDashboard(store *SessionStore, activeTtl time.Duration) http.HandlerF
 		data := DashboardData{
 			ActiveTtlMinutes: int64(activeTtl.Minutes()),
 			SessionCards:     cards,
+			CurrentFilter:    filter,
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
