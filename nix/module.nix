@@ -85,7 +85,7 @@ in
     };
 
     idleShutdownMs = lib.mkOption {
-      type = lib.types.nonNegativeInt;
+      type = lib.types.ints.unsigned;
       default = 0;
       description = "Shut the server down after all clients disconnect for this long, in milliseconds.";
     };
