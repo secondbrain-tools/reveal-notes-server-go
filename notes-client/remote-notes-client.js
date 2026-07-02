@@ -20,6 +20,35 @@
     return unresolved(value) ? fallback : value;
   }
 
+  function resolveReveal(config, injectedConfig) {
+    return (config && config.reveal) ||
+      (injectedConfig && injectedConfig.reveal) ||
+      global.Reveal;
+  }
+
+  function isReceiverMode() {
+    var search = global.location && typeof global.location.search === "string"
+      ? global.location.search
+      : "";
+    if (!search) return false;
+    try {
+      return new URLSearchParams(search).has("receiver");
+    } catch (e) {
+      return /(?:^|[?&])receiver(?:[=&]|$)/.test(search);
+    }
+  }
+
+  function initializeReveal(reveal, revealConfig) {
+    if (!reveal) {
+      console.warn("RemoteNotesClient: Reveal-compatible API not found");
+      return Promise.resolve(null);
+    }
+    var ready = reveal.initialize ? reveal.initialize(revealConfig || {}) : Promise.resolve();
+    return Promise.resolve(ready).then(function () {
+      return reveal;
+    });
+  }
+
   function loadScript(src, done) {
     if (!src) return done(new Error("Missing socket.io script path"));
     if (global.io) return done();
@@ -37,10 +66,6 @@
   function createClient(config) {
     var reveal = config.reveal || global.Reveal;
     var revealConfig = config.revealConfig || {};
-    if (!reveal) {
-      console.warn("RemoteNotesClient: Reveal-compatible API not found");
-      return null;
-    }
 
     var token = config.token || "";
     var serverUrl = config.serverUrl;
@@ -139,17 +164,26 @@
     bestEffortCookieAuth();
 
     function bindReveal() {
-      var ready = reveal.initialize ? reveal.initialize(revealConfig) : Promise.resolve();
-      Promise.resolve(ready).then(function () {
-        if (reveal.on) {
-          reveal.on("slidechanged", post);
-          reveal.on("fragmentshown", post);
-          reveal.on("fragmenthidden", post);
-          reveal.on("overviewhidden", post);
-          reveal.on("overviewshown", post);
-        }
-        post();
-      });
+      initializeReveal(reveal, revealConfig).then(function (initializedReveal) {
+          if (!initializedReveal) return;
+          if (initializedReveal.on) {
+            initializedReveal.on("slidechanged", post);
+            initializedReveal.on("fragmentshown", post);
+            initializedReveal.on("fragmenthidden", post);
+            initializedReveal.on("overviewhidden", post);
+            initializedReveal.on("overviewshown", post);
+          }
+          post();
+        })
+        .catch(function (err) {
+          console.warn("RemoteNotesClient: Reveal init failed", err);
+          emitStatus("error", {
+            error: err,
+            serverUrl: serverUrl,
+            socketId: socketId,
+            notesUrl: notesUrl,
+          });
+        });
     }
 
     bindReveal();
@@ -186,6 +220,23 @@
       var revealConfig =
         config.revealConfig || injectedConfig.revealConfig || {};
 
+      var reveal = resolveReveal(config, injectedConfig);
+
+      // Speaker-view preview iframes append ?receiver to the uploaded deck URL.
+      // If that deck also includes this shared client, connecting from inside
+      // the iframe would create a second presentation client for the same
+      // socketId and can cause echo/feedback traffic. In receiver mode we still
+      // initialize Reveal so the preview renders, but we skip the Socket.IO
+      // connection and never post slide state back to the server.
+      if (isReceiverMode()) {
+        return initializeReveal(reveal, revealConfig).then(function () {
+          return {
+            receiverMode: true,
+            reveal: reveal,
+          };
+        });
+      }
+
       if (!serverUrl) {
         console.warn("RemoteNotesClient: no serverUrl configured");
         return Promise.resolve(null);
@@ -197,7 +248,7 @@
           try {
             resolve(
               createClient({
-                reveal: config.reveal || injectedConfig.reveal,
+                reveal: reveal,
                 serverUrl: serverUrl,
                 token: token,
                 socketId: config.socketId || injectedConfig.socketId,
