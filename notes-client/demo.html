@@ -42,33 +42,6 @@
             .reveal .muted {
                 opacity: 0.72;
             }
-            .reveal .pill {
-                display: inline-block;
-                padding: 0.18em 0.55em;
-                border: 1px solid rgba(255, 255, 255, 0.35);
-                border-radius: 999px;
-                font-size: 0.55em;
-                vertical-align: middle;
-            }
-            .reveal .grid {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 1rem;
-                margin-top: 1.4rem;
-            }
-            .reveal .card {
-                background: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                border-radius: 18px;
-                padding: 1rem;
-                min-height: 160px;
-            }
-            .reveal .card strong {
-                color: var(--accent);
-            }
-            .reveal small {
-                line-height: 1.45;
-            }
         </style>
     </head>
     <body>
@@ -77,12 +50,9 @@
                 <section
                     data-background-gradient="linear-gradient(135deg, #111827, #0f172a 55%, #075985)"
                 >
-                    <p class="pill">Demo</p>
+                    <p>Demo</p>
                     <h1>Remote Notes Server</h1>
-                    <p class="muted">
-                        Speaker notes for Reveal.js — view locally, with notes
-                        centrally.
-                    </p>
+                    <p class="muted">Remote Speaker notes for Reveal.js</p>
                 </section>
 
                 <section>
@@ -172,6 +142,16 @@ window.REMOTE_NOTES_CLIENT_CONFIG = {
 &lt;script src="./remote-notes-client.js"&gt;&lt;/script&gt;
 &lt;script&gt;window.RemoteNotesClient.init();&lt;/script&gt;
                     </code></pre>
+                    <p class="muted">
+                        <span class="accent">socketId</span> is the presentation
+                        name (filename of uploaded presentation without
+                        extension)
+                    </p>
+                    <p class="muted">
+                        use
+                        <span class="accent">upload-presentation --name</span>
+                        to set it manually
+                    </p>
                 </section>
             </div>
         </div>
