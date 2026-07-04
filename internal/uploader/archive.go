@@ -93,20 +93,21 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 			return nil
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlinks are not supported: %s", current)
-		}
-
 		rel, err := filepath.Rel(sourceAbs, current)
 		if err != nil {
 			return err
 		}
 		relSlash := filepath.ToSlash(rel)
-		// Filelist include check: only include paths matching filelist patterns
+
+		// Filelist include check: only include paths matching filelist patterns.
+		// We intentionally do not return fs.SkipDir here. Non-dirOnly patterns
+		// (e.g. `**/*.js`) do not match the directory itself but may match
+		// files inside it, so the walker must descend and filter per file.
+		// The symlink guard below is gated on inclusion, so excluded paths
+		// (e.g. node_modules/.pnpm trees) never trigger symlink errors.
+		//
+		// For the include matcher, Ignored() returns true when a path is
+		// matched by an include rule, i.e. when it should be kept.
 		if includeMatcher != nil && current != htmlAbs {
 			included, err := includeMatcher.Ignored(relSlash, d.IsDir())
 			if err != nil {
@@ -117,13 +118,27 @@ func BuildArchive(opts ArchiveOptions) (archive []byte, err error) {
 			}
 		}
 
-		// Apply --ignore patterns as post-filter
+		// Apply --ignore patterns as post-filter. For excluded directories we
+		// return fs.SkipDir so the walker does not descend into them; this is
+		// unambiguous because --ignore patterns (typically dirOnly or simple
+		// file globs) apply to the whole subtree.
 		ignored, err := matcher.Ignored(relSlash, d.IsDir())
 		if err != nil {
 			return err
 		}
 		if ignored {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinks are not supported: %s", current)
 		}
 
 		entryName := relSlash

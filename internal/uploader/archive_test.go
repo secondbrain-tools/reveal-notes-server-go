@@ -624,6 +624,97 @@ func TestBuildArchiveFilelistSymlinkRejected(t *testing.T) {
 	}
 }
 
+// TestBuildArchiveFilelistExcludesSymlinkedTree covers the regression where a
+// subtree not referenced by the filelist (e.g. a sibling WebApps/ project that
+// happens to sit next to a presentation and contains node_modules/.pnpm/...
+// symlinks) must not trip the symlink guard. The walker descends into the
+// excluded tree but every entry is filtered out by the include matcher
+// before the symlink check runs.
+func TestBuildArchiveFilelistExcludesSymlinkedTree(t *testing.T) {
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+	mustWriteFile(t, filepath.Join(source, "plugin", "main.js"), []byte("plugin"))
+
+	// Mirror a pnpm hoisted-store layout: a real file under .pnpm/... and a
+	// sibling node_modules/<dep> symlink pointing into it.
+	pnpmDir := filepath.Join(source, "WebApps", "code", "basic-project", "node_modules", ".pnpm", "@babel+code-frame@7.29.0", "node_modules", "@babel", "code-frame")
+	if err := os.MkdirAll(filepath.Dir(pnpmDir), 0o755); err != nil {
+		t.Fatalf("mkdir pnpm parent: %v", err)
+	}
+	mustWriteFile(t, pnpmDir, []byte("code-frame"))
+	linkPath := filepath.Join(filepath.Dir(filepath.Dir(pnpmDir)), "helper-validator-identifier")
+	if err := os.Symlink("../../../@babel+helper-validator-identifier@7.28.5/node_modules/@babel/helper-validator-identifier", linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Filelist only mentions plugin/, nothing under WebApps/.
+	filelist := mustWriteFilelist(t, "plugin/\n")
+
+	archive, err := BuildArchive(ArchiveOptions{
+		SourceDir:    source,
+		HTMLFile:     "presentation.html",
+		FilelistPath: filelist,
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive: %v", err)
+	}
+
+	entries := zipToMap(t, archive)
+	if _, ok := entries["index.html"]; !ok {
+		t.Fatal("expected index.html in archive")
+	}
+	if _, ok := entries["plugin/main.js"]; !ok {
+		t.Fatal("expected plugin/main.js in archive")
+	}
+	for name := range entries {
+		if strings.HasPrefix(name, "WebApps/") {
+			t.Fatalf("excluded WebApps tree leaked into archive: %s", name)
+		}
+	}
+}
+
+// TestBuildArchiveIgnoreExcludesSymlinkedTree covers the same regression but
+// with the exclusion coming from --ignore rather than the filelist. A user
+// passing `--ignore WebApps/` must get a successful build even when that tree
+// contains symlinks.
+func TestBuildArchiveIgnoreExcludesSymlinkedTree(t *testing.T) {
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "presentation.html"), []byte("<html></html>"))
+	mustWriteFile(t, filepath.Join(source, "plugin", "main.js"), []byte("plugin"))
+
+	pnpmDir := filepath.Join(source, "WebApps", "code", "basic-project", "node_modules", ".pnpm", "@babel+code-frame@7.29.0", "node_modules", "@babel", "code-frame")
+	if err := os.MkdirAll(filepath.Dir(pnpmDir), 0o755); err != nil {
+		t.Fatalf("mkdir pnpm parent: %v", err)
+	}
+	mustWriteFile(t, pnpmDir, []byte("code-frame"))
+	linkPath := filepath.Join(filepath.Dir(filepath.Dir(pnpmDir)), "helper-validator-identifier")
+	if err := os.Symlink("../../../@babel+helper-validator-identifier@7.28.5/node_modules/@babel/helper-validator-identifier", linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	archive, err := BuildArchive(ArchiveOptions{
+		SourceDir:      source,
+		HTMLFile:       "presentation.html",
+		IgnorePatterns: []string{"WebApps/"},
+	})
+	if err != nil {
+		t.Fatalf("BuildArchive: %v", err)
+	}
+
+	entries := zipToMap(t, archive)
+	if _, ok := entries["index.html"]; !ok {
+		t.Fatal("expected index.html in archive")
+	}
+	if _, ok := entries["plugin/main.js"]; !ok {
+		t.Fatal("expected plugin/main.js in archive")
+	}
+	for name := range entries {
+		if strings.HasPrefix(name, "WebApps/") {
+			t.Fatalf("excluded WebApps tree leaked into archive: %s", name)
+		}
+	}
+}
+
 // mustWriteFilelist writes content to a temp file and returns its path.
 func mustWriteFilelist(t *testing.T, content string) string {
 	t.Helper()
