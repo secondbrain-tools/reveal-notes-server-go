@@ -25,18 +25,16 @@ func requireAccessToken(auth *browserAuth, next http.HandlerFunc) http.HandlerFu
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if auth.authThrottled(r) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"too many requests"}`))
+			auth.writeThrottledResponse(w, r, `{"error":"too many requests"}`)
 			return
 		}
 		if !hasBearerToken(r, auth.token) {
-			status := http.StatusUnauthorized
 			if auth.recordAuthFailure(r) {
-				status = http.StatusTooManyRequests
+				auth.writeThrottledResponse(w, r, `{"error":"too many requests"}`)
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
+			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}

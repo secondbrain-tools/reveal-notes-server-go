@@ -115,7 +115,7 @@ func NewServer(cfg ServerConfig) *Server {
 			}
 			if httpReq != nil && auth.authThrottled(httpReq) {
 				log.Printf("[auth] sio.Use: method=%s path=%s result=throttled", httpReq.Method, path)
-				next(socket.NewExtendedError("too many requests", nil))
+				next(socket.NewExtendedError("too many requests", throttledErrorData(auth, httpReq)))
 				return
 			}
 			if err := authorizeHandshake(cfg.AccessToken, authPayload, func() *utils.ParameterBag {
@@ -158,7 +158,7 @@ func NewServer(cfg ServerConfig) *Server {
 			}
 			if httpReq != nil && auth.recordAuthFailure(httpReq) {
 				log.Printf("[auth] sio.Use: rejected (throttled)")
-				next(socket.NewExtendedError("too many requests", nil))
+				next(socket.NewExtendedError("too many requests", throttledErrorData(auth, httpReq)))
 				return
 			}
 			log.Printf("[auth] sio.Use: REJECTED handshake")

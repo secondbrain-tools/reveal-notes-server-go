@@ -126,10 +126,10 @@ func main() {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		if len(body) > 0 {
-			fatalf("upload failed: %s: %s", resp.Status, body)
-		}
-		fatalf("upload failed: %s", resp.Status)
+		// FormatUploadFailure diagnoses whether the response came from a
+		// front-end HTTP proxy (nginx/Cloudflare/etc.) or the notes server
+		// itself, and renders a "Note:" hint when it did.
+		fatalf("%s", uploader.FormatUploadFailure(resp, body, len(archive)))
 	}
 
 	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {

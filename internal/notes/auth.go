@@ -137,6 +137,100 @@ func (t *authAttemptThrottle) reset(r *http.Request) {
 	t.mu.Unlock()
 }
 
+// retryAfter returns the duration until the lockout lifts for r's client.
+// Returns 0 when the client is not currently locked out. Callers should
+// only consult this after confirmed the client is throttled (limited == true)
+// or after a fresh recordFailure that just set a lockout, otherwise the
+// value is not meaningful.
+func (t *authAttemptThrottle) retryAfter(r *http.Request) time.Duration {
+	if t == nil {
+		return 0
+	}
+	key := t.clientKey(r)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	st := t.attempts[key]
+	if st == nil {
+		return 0
+	}
+	if st.blockedUntil.IsZero() {
+		return 0
+	}
+	// Use the package-level `now` variable (not time.Now) so tests can
+	// override the clock. In production now == time.Now so behavior is
+	// identical to time.Until.
+	d := st.blockedUntil.Sub(now())
+	if d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// authRetryAfter is the public wrapper that respects the enabled() guard.
+func (a *browserAuth) authRetryAfter(r *http.Request) time.Duration {
+	if a == nil || !a.enabled() || a.throttle == nil {
+		return 0
+	}
+	return a.throttle.retryAfter(r)
+}
+
+// writeThrottledResponse writes a 429 with a Retry-After header (in seconds,
+// rounded up, minimum 1) when a lockout is active, plus a JSON or text body.
+// `jsonBody` selects the content type; pass empty for text/plain.
+func (a *browserAuth) writeThrottledResponse(w http.ResponseWriter, r *http.Request, jsonBody string) {
+	if d := a.authRetryAfter(r); d > 0 {
+		setRetryAfterSeconds(w, d)
+	}
+	if jsonBody != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(jsonBody))
+		return
+	}
+	http.Error(w, "too many requests", http.StatusTooManyRequests)
+}
+
+// setRetryAfterSeconds writes a Retry-After header (seconds, rounded up,
+// minimum 1) to w. Used by the login page handler which composes its own
+// response (an HTML page) and only needs the header set before its own
+// status code and body.
+func setRetryAfterSeconds(w http.ResponseWriter, d time.Duration) {
+	if s := retryAfterSeconds(d); s > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(s))
+	}
+}
+
+// retryAfterSeconds converts a duration to a non-negative integer number of
+// seconds (rounded up, minimum 1) for use in both the HTTP Retry-After
+// header and the Socket.IO ExtendedError data payload.
+func retryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	seconds := int(d / time.Second)
+	if d%time.Second > 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return seconds
+}
+
+// throttledErrorData returns the data payload to attach to a Socket.IO
+// ExtendedError so the client can learn when the lockout lifts. The
+// returned map is {"retryAfter": <seconds>} when a lockout is active,
+// nil otherwise. Mirrors the Retry-After HTTP header behavior.
+func throttledErrorData(a *browserAuth, r *http.Request) map[string]any {
+	s := retryAfterSeconds(a.authRetryAfter(r))
+	if s == 0 {
+		return nil
+	}
+	return map[string]any{"retryAfter": s}
+}
+
 type browserAuth struct {
 	token    string
 	throttle *authAttemptThrottle
@@ -380,7 +474,7 @@ func (a *browserAuth) wrapSocket(next http.Handler) http.HandlerFunc {
 		authSummary := requestAuthChannels(r)
 		if a.authThrottled(r) {
 			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=throttled", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			a.writeThrottledResponse(w, r, "")
 			return
 		}
 		if a.authenticated(r) {
@@ -391,7 +485,7 @@ func (a *browserAuth) wrapSocket(next http.Handler) http.HandlerFunc {
 		}
 		if a.recordAuthFailure(r) {
 			log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=throttled", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			a.writeThrottledResponse(w, r, "")
 			return
 		}
 		log.Printf("[auth] wrapSocket: method=%s path=%s origin=%q auth=%s result=rejected", r.Method, r.URL.Path, r.Header.Get("Origin"), authSummary)
@@ -422,6 +516,9 @@ func (a *browserAuth) loginHandler() http.HandlerFunc {
 			}
 			returnTo := cleanLoginReturnTo(r.FormValue("returnTo"))
 			if a.authThrottled(r) {
+				if d := a.authRetryAfter(r); d > 0 {
+					setRetryAfterSeconds(w, d)
+				}
 				renderLoginPage(w, returnTo, "too many failed attempts", http.StatusTooManyRequests)
 				return
 			}
@@ -430,6 +527,9 @@ func (a *browserAuth) loginHandler() http.HandlerFunc {
 				status := http.StatusUnauthorized
 				if a.recordAuthFailure(r) {
 					status = http.StatusTooManyRequests
+					if d := a.authRetryAfter(r); d > 0 {
+						setRetryAfterSeconds(w, d)
+					}
 				}
 				renderLoginPage(w, returnTo, "invalid access token", status)
 				return
@@ -624,7 +724,7 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 		}
 		if a.authThrottled(r) {
 			log.Printf("[auth] /auth-token: throttled")
-			http.Error(w, `{"error":"too many requests"}`, http.StatusTooManyRequests)
+			a.writeThrottledResponse(w, r, `{"error":"too many requests"}`)
 			return
 		}
 
@@ -657,6 +757,10 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 			if a.recordAuthFailure(r) {
 				status = http.StatusTooManyRequests
 			}
+			if status == http.StatusTooManyRequests {
+				a.writeThrottledResponse(w, r, `{"error":"missing token"}`)
+				return
+			}
 			http.Error(w, `{"error":"missing token"}`, status)
 			return
 		}
@@ -664,6 +768,10 @@ func (a *browserAuth) tokenExchangeHandler() http.HandlerFunc {
 			status := http.StatusUnauthorized
 			if a.recordAuthFailure(r) {
 				status = http.StatusTooManyRequests
+			}
+			if status == http.StatusTooManyRequests {
+				a.writeThrottledResponse(w, r, `{"error":"invalid token"}`)
+				return
 			}
 			http.Error(w, `{"error":"invalid token"}`, status)
 			return

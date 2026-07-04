@@ -64,7 +64,7 @@ func TestRequireAccessTokenThrottlesFailures(t *testing.T) {
 	if resp.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after repeated failures, got %d", resp.Code)
 	}
-	if body := strings.TrimSpace(resp.Body.String()); body != `{"error":"unauthorized"}` {
+	if body := strings.TrimSpace(resp.Body.String()); body != `{"error":"too many requests"}` {
 		t.Fatalf("unexpected throttled body: %s", body)
 	}
 }
